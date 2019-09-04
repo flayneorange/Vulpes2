@@ -18,6 +18,7 @@ typedef s64 fint;
 typedef u64 fuint;
 
 //---Utilities
+#define fox_for(iterator_name, count) for (fuint iterator_name = 0; iterator_name < count; ++iterator_name)
 #define fox_assert(condition) if (!(condition)) { (*(fuint*)0) = 0; }
 
 template<typename Type>
@@ -49,15 +50,44 @@ struct Array {
 		length = c_array_length;
 	}
 	
-	ElementType& operator[](fuint index) {
+	ElementType& operator[](fuint index) const {
 		fox_assert(index < length);
 		return data[index];
 	}
-	ElementType& get(fuint index) {
+	ElementType& get(fuint index) const {
 		fox_assert(index < length);
 		return data[index];
+	}
+	
+	operator bool() const {
+		return length != 0;
 	}
 };
+
+template<typename ElementType>
+bool equals(const Array<ElementType>& array0, const Array<ElementType>& array1) {
+	auto length = array0.length;
+	if (array1.length == length) {
+		fox_for (ielement, array1.length) {
+			if (array0[ielement] != array1[ielement]) {
+				return false;
+			}
+		}
+		return true;
+	}
+	return false;
+}
+
+template<typename ElementType>
+bool operator==(Array<ElementType> array0, Array<ElementType> array1) {
+	return equals(array0, array1);
+}
+
+template<typename ElementType>
+bool operator!=(Array<ElementType> array0, Array<ElementType> array1) {
+	return !equals(array0, array1);
+}
+
 
 struct ConstString : Array<const char> {
 	ConstString() = default;
@@ -77,6 +107,7 @@ void test_arrays() {
 }
 
 //---Allocators
+#define Static
 fuint align_offset_up(fuint offset, fuint align) {
 	fox_assert(align);
 	return offset + ((~offset + 1) & (align - 1));
@@ -143,10 +174,11 @@ Type* allocate(AllocatorType* allocator) {
 }
 
 template<typename Type, typename AllocatorType>
-Array<Type> allocate_array(AllocatorType* allocator, fuint length) {
+Array<Type> allocate_array(fuint length, AllocatorType* allocator) {
 	Array<Type> new_array;
 	zero(&new_array);
 	new_array.data = (Type*)allocate_block(allocator, sizeof(Type) * length, alignof(Type));
+	new_array.length = length;
 	return new_array;
 }
 
@@ -167,7 +199,7 @@ void test_allocators() {
 	fox_assert(test_allocator.cursor == (void*)5);
 	allocate<u16>(&test_allocator);
 	fox_assert(test_allocator.cursor == (void*)8);
-	allocate_array<u64>(&test_allocator, 3);
+	allocate_array<u64>(3, &test_allocator);
 	fox_assert(test_allocator.cursor == (void*)32);
 	
 	//Test restore
@@ -192,6 +224,55 @@ void print(ConstString message) {
 	std::cout.write(message.data, message.length);
 }
 
+//---Files
+enum class FileStatus {
+	read,
+	empty,
+	error,
+};
+
+//TODO: more detailed error messaging
+template<typename AllocatorType>
+FileStatus read_whole_file(const char* path, AllocatorType* allocator, Array<u8>* out_buffer) {
+	auto* file = fopen(path, "r+");
+	if (file) {
+		fseek(file, 0, SEEK_END);
+		fuint size = ftell(file);
+		if (size) {
+			*out_buffer = allocate_array<u8>(size, allocator);
+			rewind(file);
+			auto bytes_read = fread(out_buffer->data, 1, size, file);
+			if (bytes_read == size) {
+				return FileStatus::read;
+			}
+			return FileStatus::error;
+		}
+		return FileStatus::empty;
+	}
+	return FileStatus::error;
+}
+
+void test_file_io() {
+	u8 buffer[128];
+	LinearAllocator test_allocator;
+	initialize(&test_allocator, Array<u8>(buffer));
+	Array<u8> file_contents;
+	zero(&file_contents);
+	auto status = read_whole_file("FoxLibTestFile", &test_allocator, &file_contents);
+	fox_assert(status == FileStatus::read);
+	ConstString file_contents_string;
+	file_contents_string.data = (const char*)file_contents.data;
+	file_contents_string.length = file_contents.length;
+	fox_assert(file_contents_string == ConstString("hewwo"));
+	zero(&file_contents);
+	status = read_whole_file("FoxLibTestEmptyFile", &test_allocator, &file_contents);
+	fox_assert(status == FileStatus::empty);
+	fox_assert(!file_contents);
+	status = read_whole_file("File name that definitely does not exist", &test_allocator, &file_contents);
+	fox_assert(status == FileStatus::error);
+}
+
+
 //---Vulpes
 LinearAllocator heap_stack;
 
@@ -199,6 +280,7 @@ int main() {
 	//library tests
 	test_arrays();
 	test_allocators();
+	test_file_io();
 	
 	u64 memory_size = mebibytes(1);
 	initialize(&heap_stack, malloc(memory_size), memory_size);
