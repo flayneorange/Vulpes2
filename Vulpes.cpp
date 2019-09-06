@@ -19,7 +19,11 @@ typedef u64 fuint;
 
 //---Utilities
 #define fox_for(iterator_name, count) for (fuint iterator_name = 0; iterator_name < count; ++iterator_name)
-#define fox_assert(condition) if (!(condition)) { (*(fuint*)0) = 0; }
+
+#define fox_unreachable (*(fuint*)0) = 0
+#define fox_assert(condition) if (!(condition)) { fox_unreachable; }
+
+#define fox_interpret_cast(type, expression) (*(type*)&(expression))
 
 template<typename Type>
 void zero(Type* value) {
@@ -98,6 +102,10 @@ struct ConstString : Array<const char> {
 		length = c_string_length - 1;
 	}
 };
+
+void print(ConstString message) {
+	std::cout.write(message.data, message.length);
+}
 
 void test_arrays() {
 	ConstString c_string_conversion_test = "hi";
@@ -220,10 +228,6 @@ void test_allocators() {
 	fox_assert(test_allocator.cursor == (void*)8);
 }
 
-void print(ConstString message) {
-	std::cout.write(message.data, message.length);
-}
-
 //---Files
 enum class FileStatus {
 	read,
@@ -272,19 +276,47 @@ void test_file_io() {
 	fox_assert(status == FileStatus::error);
 }
 
-
-//---Vulpes
-LinearAllocator heap_stack;
-
-int main() {
+void test_foxlib() {
 	//library tests
 	test_arrays();
 	test_allocators();
 	test_file_io();
+}
+
+//---Vulpes
+LinearAllocator heap_stack;
+
+int main(char** arguments, int argument_count) {
+	test_foxlib();
 	
 	u64 memory_size = mebibytes(1);
 	initialize(&heap_stack, malloc(memory_size), memory_size);
 	
-	print("hello world!\n");
+	if (argument_count > 1) {
+		auto file_path = arguments[0];
+		Array<u8> file_data;
+		zero(&file_data);
+		auto file_read_status = read_whole_file(file_path, &heap_stack, &file_data);
+		switch (file_read_status) {
+			case FileStatus::read: {
+				print(fox_interpret_cast(ConstString, file_data));
+			} break;
+			
+			case FileStatus::empty: {
+				print("File empty!\n");
+			} break;
+			
+			case FileStatus::error: {
+				print("File inaccessable!\n");
+			} break;
+			
+			default: {
+				fox_unreachable;
+			} break;
+		}
+	} else {
+		print("Usage: vulpes.exe <file to compile>\n");
+	}
+	
 	return 0;
 }

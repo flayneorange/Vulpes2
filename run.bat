@@ -1,2 +1,2 @@
 @echo off
-build\vulpes.exe
+build\vulpes.exe test.vulpes
