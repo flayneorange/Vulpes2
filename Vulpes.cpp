@@ -83,20 +83,23 @@ struct String : Array<char> {
 struct ConstString : Array<const char> {
 	ConstString() = default;
 	ConstString(const ConstString& other) = default;
+	ConstString(const String& other) {
+		data = other.data;
+		length = other.length;
+	}
 	template<fuint c_string_length> ConstString(const char (&c_string)[c_string_length]) {
 		data = c_string;
 		//Good god C++ why???
 		length = c_string_length - 1;
 	}
-	
-	ConstString(const String& other) {
-		data = other.data;
-		length = other.length;
+	ConstString(const char* c_string_without_length) {
+		data = c_string_without_length;
+		length = strlen(c_string_without_length);
 	}
 };
 
 template<typename ElementType>
-internal bool equals(const ElementType* data0, fuint length0, const ElementType* data1, fuint length1) {
+internal bool array_equals(const ElementType* data0, fuint length0, const ElementType* data1, fuint length1) {
 	if (length0 == length1) {
 		return memcmp(data0, data1, length0 * sizeof(ElementType)) == 0;
 	}
@@ -105,12 +108,12 @@ internal bool equals(const ElementType* data0, fuint length0, const ElementType*
 
 template<typename ElementType0, typename ElementType1>
 internal bool operator==(Array<ElementType0> array0, Array<ElementType1> array1) {
-	return equals(array0.data, array0.length, array1.data, array1.length);
+	return array_equals(array0.data, array0.length, array1.data, array1.length);
 }
 
 template<typename ElementType0, typename ElementType1>
 internal bool operator!=(Array<ElementType0> array0, Array<ElementType1> array1) {
-	return !equals(array0.data, array0.length, array1.data, array1.length);
+	return !array_equals(array0.data, array0.length, array1.data, array1.length);
 }
 
 internal void print(ConstString message) {
@@ -319,6 +322,7 @@ internal void test_dynamic_arrays() {
 
 //---Files
 enum class FileStatus {
+	invalid,
 	read,
 	empty,
 	error,
@@ -383,21 +387,31 @@ int main(int argument_count, char** arguments) {
 	initialize(&heap_stack, malloc(memory_size), memory_size);
 	
 	if (argument_count > 1) {
-		auto file_path = arguments[1];
+		ConstString file_path = arguments[1];
 		Array<u8> file_data;
 		zero(&file_data);
-		auto file_read_status = read_entire_file(file_path, &heap_stack, &file_data);
+		auto file_read_status = read_entire_file(file_path.data, &heap_stack, &file_data);
 		switch (file_read_status) {
 			case FileStatus::read: {
 				print(fox_interpret_cast(ConstString, file_data));
 			} break;
 			
 			case FileStatus::empty: {
-				print("File empty!\n");
+				String error_message;
+				zero(&error_message);
+				push_array(&error_message, "File ", &heap_stack);
+				push_array(&error_message, file_path, &heap_stack);
+				push_array(&error_message, " is empty!\n", &heap_stack);
+				print(error_message);
 			} break;
 			
 			case FileStatus::error: {
-				print("File inaccessable!\n");
+				String error_message;
+				zero(&error_message);
+				push_array(&error_message, "File ", &heap_stack);
+				push_array(&error_message, file_path, &heap_stack);
+				push_array(&error_message, " is inaccessible!\n", &heap_stack);
+				print(error_message);
 			} break;
 			
 			default: {
