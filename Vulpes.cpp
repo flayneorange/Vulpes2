@@ -14,6 +14,11 @@ typedef std::uint16_t u16;
 typedef std::uint32_t u32;
 typedef std::uint64_t u64;
 
+typedef u8 b8;
+typedef u16 b16;
+typedef u32 b32;
+typedef u64 b64;
+
 typedef s64 fint;
 typedef u64 fuint;
 
@@ -40,6 +45,41 @@ internal void zero(Type* value) {
 #define exbibytes(amount) (pebibytes(amount) * 1024)
 #define zebibytes(amount) (exbibytes(amount) * 1024)
 #define yobibytes(amount) (zebibytes(amount) * 1024)
+
+//---Optional
+struct NilType {
+};
+//@todo const this
+NilType nil;
+
+template<typename ValueType>
+struct Optional {
+	ValueType value;
+	b8 has_value;
+	
+	Optional(ValueType non_nil_value) {
+		value = non_nil_value;
+		has_value = true;
+	}
+	Optional(NilType nil_value) {
+		(void)nil_value;
+		has_value = false;
+	}
+	
+	operator bool() {
+		return has_value;
+	}
+};
+
+void test_optionals() {
+	Optional<u64> has_420 = 420;
+	Optional<bool> has_false = false;
+	Optional<u64> doesnt_have_69 = nil;
+	doesnt_have_69.value = 69;
+	fox_assert(has_420 && has_420.value == 420);
+	fox_assert(has_false && !has_false.value);
+	fox_assert(!doesnt_have_69);
+}
 
 //---Array
 template<typename ElementType>
@@ -76,6 +116,7 @@ struct String : Array<char> {
 	template<fuint c_string_length> String(char (&c_string)[c_string_length]) {
 		data = c_string;
 		//Good god C++ why???
+		//@todo we have this everywhere and i don't think i want it everywhere
 		length = c_string_length - 1;
 	}
 };
@@ -89,7 +130,6 @@ struct ConstString : Array<const char> {
 	}
 	template<fuint c_string_length> ConstString(const char (&c_string)[c_string_length]) {
 		data = c_string;
-		//Good god C++ why???
 		length = c_string_length - 1;
 	}
 	ConstString(const char* c_string_without_length) {
@@ -99,16 +139,13 @@ struct ConstString : Array<const char> {
 };
 
 template<typename ArrayType>
-internal bool find(ArrayType* array, typename ArrayType::ElementTypeMember element, fuint* out_index = nullptr) {
-	fox_for (index, array->length) {
-		if (array->get(index) == element) {
-			if (out_index) {
-				*out_index = index;
-			}
-			return true;
+internal Optional<fuint> find(ArrayType array, typename ArrayType::ElementTypeMember element) {
+	fox_for (index, array.length) {
+		if (array[index] == element) {
+			return index;
 		}
 	}
-	return false;
+	return nil;
 }
 
 template<typename ElementType>
@@ -158,16 +195,17 @@ internal void test_arrays() {
 	fox_assert(test_hello.length == 5);
 	fox_assert(test_hello == "hello");
 	
-	fuint h_index = 0;
-	fox_assert(find(&test_hello, 'h', &h_index));
-	fuint e_index = 0;
-	fox_assert(find(&test_hello, 'e', &e_index));
-	fox_assert(find(&test_hello, 'l'));
-	fuint o_index = 0;
-	fox_assert(find(&test_hello, 'o', &o_index));
-	fuint z_index = 420;
-	fox_assert(!find(&test_hello, 'z', &z_index));
-	fox_assert(z_index == 420);
+	auto h_index = find(test_hello, 'h');
+	fox_assert(h_index);
+	fox_assert(h_index.value == 0);
+	auto e_index = find(test_hello, 'e');
+	fox_assert(e_index);
+	fox_assert(e_index.value == 1);
+	auto o_index = find(test_hello, 'o');
+	fox_assert(o_index);
+	fox_assert(o_index.value == 4);
+	auto z_index = find(test_hello, 'z');
+	fox_assert(!z_index);
 }
 
 //---Allocators
@@ -438,22 +476,39 @@ internal void test_foxlib() {
 //---Vulpes
 LinearAllocator heap_stack;
 
-ConstString space_characters = " \t\n";
-ConstString operator_characters = "=";
+bool is_space_character(char* character) {
+	return *character <= ' ';
+}
+
+bool is_operator_character(char* character) {
+	return find(ConstString("=+"), *character);
+}
+
+bool is_number_character(char *character) {
+	return '0' <= *character && *character <= '9';
+}
 
 //---Lexer
 
-
 //Language keywords/operators 
+//Aligns with keyword_values;
 enum class Keyword {
 	assign,
+	add,
 };
+ConstString keyword_values_thing[] = {
+	"=",
+	"+",
+};
+
+Array<ConstString> keyword_values = keyword_values_thing;
 
 enum class TokenKind {
 	invalid,
-	identifier,
 	integer,
+	string,
 	keyword,
+	identifier,
 };
 
 struct Token {
@@ -465,7 +520,12 @@ struct Token {
 	};
 };
 
-Array<Token> lex(String source) {
+Optional<Array<Token>> lex(String source) {
+	fox_assert(source);
+	
+	Array<Token> tokens;
+	zero(&tokens);
+	
 	//Replace '\r\n' with ' \n'
 	fox_for (source_index, source.length) {
 		if (source[source_index] == '\r') {
@@ -478,10 +538,47 @@ Array<Token> lex(String source) {
 		}
 	}
 	
-	Array<Token> tokens;
-	zero(&tokens);
+	char* cursor = source.data;
+	char* source_end = source.data + source.length;
 	
-	auto new_token = push_zero(&tokens, &heap_stack);
+	while (cursor < source_end) {
+		//Skip whitespace
+		while (is_space_character(cursor)) {
+			cursor++;
+			if (cursor == source_end) {
+				return tokens;
+			}
+		}
+		
+		//Check for operators
+		{
+			auto operator_start = cursor;
+			auto operator_end = operator_start;
+			while (operator_end < source_end && is_operator_character(operator_end)) {
+				operator_end++;
+			}
+			
+			ConstString operator_string;
+			operator_string.data = operator_start;
+			operator_string.length = operator_end - operator_start;
+			
+			auto keyword_index_optional = find(keyword_values, operator_string);
+			if (keyword_index_optional) {
+				auto new_token = push_zero(&tokens, &heap_stack);
+				new_token->kind = TokenKind::keyword;
+				new_token->keyword_value = (Keyword)keyword_index_optional.value;
+			} else {
+				String error_message;
+				zero(&error_message);
+				push_array(&error_message, "Syntax error: ", &heap_stack);
+				push_array(&error_message, operator_string, &heap_stack);
+				push_array(&error_message, " is not a valid operator.\n", &heap_stack);
+				print(error_message);
+				return nil;
+			}
+		}
+	}
+	
 	return tokens;
 }
 
