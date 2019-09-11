@@ -98,6 +98,19 @@ struct ConstString : Array<const char> {
 	}
 };
 
+template<typename ArrayType>
+internal bool find(ArrayType* array, typename ArrayType::ElementTypeMember element, fuint* out_index = nullptr) {
+	fox_for (index, array->length) {
+		if (array->get(index) == element) {
+			if (out_index) {
+				*out_index = index;
+			}
+			return true;
+		}
+	}
+	return false;
+}
+
 template<typename ElementType>
 internal bool array_equals(const ElementType* data0, fuint length0, const ElementType* data1, fuint length1) {
 	if (length0 == length1) {
@@ -116,15 +129,45 @@ internal bool operator!=(Array<ElementType0> array0, Array<ElementType1> array1)
 	return !array_equals(array0.data, array0.length, array1.data, array1.length);
 }
 
+template<typename ElementType, typename fuint c_string_length>
+internal bool operator==(Array<ElementType> array, const char (&c_string)[c_string_length]) {
+	return array_equals(array.data, array.length, c_string, c_string_length - 1);
+}
+
+template<typename ElementType, typename fuint c_string_length>
+internal bool operator!=(Array<ElementType> array, const char (&c_string)[c_string_length]) {
+	return !array_equals(array.data, array.length, c_string, c_string_length - 1);
+}
+
+template<typename ElementType, typename fuint c_string_length>
+internal bool operator==(const char (&c_string)[c_string_length], Array<ElementType> array) {
+	return array_equals(array.data, array.length, c_string, c_string_length - 1);
+}
+
+template<typename ElementType, typename fuint c_string_length>
+internal bool operator!=(const char (&c_string)[c_string_length], Array<ElementType> array) {
+	return !array_equals(array.data, array.length, c_string, c_string_length - 1);
+}
+
 internal void print(ConstString message) {
 	std::cout.write(message.data, message.length);
 }
 
 internal void test_arrays() {
-	ConstString c_string_conversion_test = "hi";
-	fox_assert(c_string_conversion_test[0] == 'h');
-	fox_assert(c_string_conversion_test[1] == 'i');
-	fox_assert(c_string_conversion_test.length == 2);
+	ConstString test_hello = "hello";
+	fox_assert(test_hello.length == 5);
+	fox_assert(test_hello == "hello");
+	
+	fuint h_index = 0;
+	fox_assert(find(&test_hello, 'h', &h_index));
+	fuint e_index = 0;
+	fox_assert(find(&test_hello, 'e', &e_index));
+	fox_assert(find(&test_hello, 'l'));
+	fuint o_index = 0;
+	fox_assert(find(&test_hello, 'o', &o_index));
+	fuint z_index = 420;
+	fox_assert(!find(&test_hello, 'z', &z_index));
+	fox_assert(z_index == 420);
 }
 
 //---Allocators
@@ -257,10 +300,18 @@ internal void expand(Array<ElementType>* array, fuint count, AllocatorType* allo
 }
 
 template<typename ArrayType, typename AllocatorType = void>
-internal typename ArrayType::ElementTypeMember& push(ArrayType* array, typename ArrayType::ElementTypeMember new_element, AllocatorType* allocator = nullptr) {
+internal void push(ArrayType* array, typename ArrayType::ElementTypeMember new_element, AllocatorType* allocator = nullptr) {
 	auto new_element_index = array->length;
 	expand(array, 1, allocator);
-	return array->get(new_element_index) = new_element;
+	array->get(new_element_index) = new_element;
+}
+
+template<typename ArrayType, typename AllocatorType = void>
+internal typename ArrayType::ElementTypeMember* push_zero(ArrayType* array, AllocatorType* allocator = nullptr) {
+	auto new_element_index = array->length;
+	expand(array, 1, allocator);
+	zero(&array->get(new_element_index));
+	return &array->get(new_element_index);
 }
 
 template<typename ArrayType, typename AllocatorType = void>
@@ -301,16 +352,16 @@ internal void test_dynamic_arrays() {
 	Array<u8> test_array1;
 	zero(&test_array1);
 	push_array(&test_array1, test_array0, &test_allocator);
-	fox_for (i, 2) {
-		fox_assert(test_array1[i] == i);
+	fox_for (index, 2) {
+		fox_assert(test_array1[index] == index);
 	}
 	
 	//Make sure reallocation moves things as necessary
 	push(&test_array0, 2, &test_allocator);
 	fox_assert(test_array0.data != test_buffer);
 	fox_assert(test_array0.length == 3);
-	fox_for (i, 3) {
-		fox_assert(test_array0[i] == i);
+	fox_for (index, 3) {
+		fox_assert(test_array0[index] == index);
 	}
 	
 	//Make sure the same functions work on strings
@@ -331,6 +382,8 @@ enum class FileStatus {
 //TODO: more detailed error messaging
 template<typename AllocatorType>
 internal FileStatus read_entire_file(const char* path, AllocatorType* allocator, Array<u8>* out_buffer) {
+	auto file_status = FileStatus::error;
+	
 	auto* file = fopen(path, "r+");
 	if (file) {
 		fseek(file, 0, SEEK_END);
@@ -340,13 +393,18 @@ internal FileStatus read_entire_file(const char* path, AllocatorType* allocator,
 			rewind(file);
 			auto bytes_read = fread(out_buffer->data, 1, size, file);
 			if (bytes_read == size) {
-				return FileStatus::read;
+				file_status = FileStatus::read;
+			} else {
+				file_status = FileStatus::error;
 			}
-			return FileStatus::error;
+		} else {
+			file_status = FileStatus::empty;
 		}
-		return FileStatus::empty;
+		
+		fclose(file);
 	}
-	return FileStatus::error;
+	
+	return file_status;
 }
 
 internal void test_file_io() {
@@ -379,6 +437,53 @@ internal void test_foxlib() {
 
 //---Vulpes
 LinearAllocator heap_stack;
+
+ConstString space_characters = " \t\n";
+ConstString operator_characters = "=";
+
+//---Lexer
+
+
+//Language keywords/operators 
+enum class Keyword {
+	assign,
+};
+
+enum class TokenKind {
+	invalid,
+	identifier,
+	integer,
+	keyword,
+};
+
+struct Token {
+	TokenKind kind;
+	union {
+		Keyword keyword_value;
+		ConstString string_value;
+		u64 integer_value;
+	};
+};
+
+Array<Token> lex(String source) {
+	//Replace '\r\n' with ' \n'
+	fox_for (source_index, source.length) {
+		if (source[source_index] == '\r') {
+			if (source_index + 1 < source.length && source[source_index + 1] == '\n') {
+				source[source_index] = ' ';
+				source_index++;
+			} else {
+				source[source_index] = '\n';
+			}
+		}
+	}
+	
+	Array<Token> tokens;
+	zero(&tokens);
+	
+	auto new_token = push_zero(&tokens, &heap_stack);
+	return tokens;
+}
 
 int main(int argument_count, char** arguments) {
 	test_foxlib();
