@@ -716,6 +716,11 @@ internal void write(ArrayType* array, const char (&c_string)[c_string_length], A
 }
 
 template<typename ArrayType, typename AllocatorType = void>
+internal void write_char(ArrayType* array, char character, AllocatorType* allocator = nullptr) {
+	push(array, character, allocator);
+}
+
+template<typename ArrayType, typename AllocatorType = void>
 internal void write_uint(ArrayType* array, u64 integer, AllocatorType* allocator = nullptr) {
 	write(array, string_from_unsigned_integer(integer), allocator);
 }
@@ -990,6 +995,66 @@ Optional<Array<Token>> lex(String source) {
 				print("Syntax error: Expected whitespace or end-of-file after integer literal.\n");
 				return nil;
 			}
+		}
+		
+		//Check for string literals
+		else if (*cursor == '\'') {
+			cursor++;
+			
+			String string_value;
+			zero(&string_value);
+			
+			while (true) {
+				if (*cursor == '\\') {
+					if (cursor + 1 == source_end) {
+						print("Syntax error: end of file after escape sequence start.\n");
+						return nil;
+					}
+					
+					switch (cursor[1]) {
+						case '\\': {
+							write(&string_value, "\\", &heap_stack);
+						} break;
+						
+						case 'n': {
+							write(&string_value, "\n", &heap_stack);
+						} break;
+						
+						case '\'': {
+							write(&string_value, "'", &heap_stack);
+						} break;
+						
+						default: {
+							String error_message;
+							zero(&error_message);
+							write(&error_message, "Syntax error: unrecognized escape sequence \\", &heap_stack);
+							write_char(&error_message, cursor[1], &heap_stack);
+							write(&error_message, "\n", &heap_stack);
+							print(error_message);
+							return nil;
+						} break;
+					}
+					
+					cursor += 2;
+				} else if (*cursor == '\'') {
+					cursor++;
+					break;
+				} else {
+					write_char(&string_value, *cursor, &heap_stack);
+					cursor++;
+				}
+				
+				if (cursor < source_end) {
+					String error_message;
+					zero(&error_message);
+					write(&error_message, "Syntax error: unexpected end of file inside string.\n", &heap_stack);
+					print(error_message);
+				}
+			}
+			
+			auto new_token = push_zero(&tokens, &heap_stack);
+			new_token->kind = TokenKind::string;
+			new_token->string_value = string_value;
 		}
 		
 		//anything else is considered an identifier character
