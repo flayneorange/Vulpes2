@@ -705,9 +705,19 @@ internal void push_array(DestinationArrayType* array, SourceArrayType new_elemen
 	push_array(array, new_elements.data, new_elements.length, allocator);
 }
 
+template<typename DestinationArrayType, typename SourceArrayType, typename AllocatorType = void>
+internal void write(DestinationArrayType* array, SourceArrayType string, AllocatorType* allocator = nullptr) {
+	push_array(array, string.data, string.length, allocator);
+}
+
 template<typename ArrayType, fuint c_string_length, typename AllocatorType = void>
-internal void push_array(ArrayType* array, const char (&c_string)[c_string_length], AllocatorType* allocator = nullptr) {
+internal void write(ArrayType* array, const char (&c_string)[c_string_length], AllocatorType* allocator = nullptr) {
 	push_array(array, c_string, c_string_length - 1, allocator);
+}
+
+template<typename ArrayType, typename AllocatorType = void>
+internal void write_uint(ArrayType* array, u64 integer, AllocatorType* allocator = nullptr) {
+	write(array, string_from_unsigned_integer(integer), allocator);
 }
 
 internal void test_dynamic_arrays() {
@@ -746,8 +756,8 @@ internal void test_dynamic_arrays() {
 	//Make sure the same functions work on strings
 	String hello_seven;
 	zero(&hello_seven);
-	push_array(&hello_seven, "hello", &test_allocator);
-	push_array(&hello_seven, "7", &test_allocator);
+	write(&hello_seven, "hello", &test_allocator);
+	write(&hello_seven, "7", &test_allocator);
 	fox_assert(hello_seven == ConstString("hello7"));
 }
 
@@ -820,6 +830,7 @@ internal void test_foxlib() {
 //---Vulpes
 LinearAllocator heap_stack;
 
+//---Lexer
 bool is_space_character(char* character) {
 	return *character <= ' ';
 }
@@ -828,30 +839,31 @@ bool is_operator_character(char* character) {
 	return find(ConstString("=+"), *character);
 }
 
-bool is_number_character(char *character) {
+bool is_number_character(char* character) {
 	return '0' <= *character && *character <= '9';
 }
 
-//---Lexer
+bool is_identifier_character(char* character) {
+	return !is_space_character(character)
+		&& !is_operator_character(character);
+}
 
 //Language keywords/operators 
-//Aligns with keyword_values;
+//Aligns with keyword_strings;
 enum class Keyword {
 	assign,
 	add,
 };
-ConstString keyword_values_thing[] = {
+ConstString keyword_strings[] = {
 	"=",
 	"+",
 };
 
-Array<ConstString> keyword_values = keyword_values_thing;
-
 enum class TokenKind {
 	invalid,
+	keyword,
 	integer,
 	string,
-	keyword,
 	identifier,
 };
 
@@ -859,10 +871,44 @@ struct Token {
 	TokenKind kind;
 	union {
 		Keyword keyword_value;
+		ConstString identifier_value;
 		ConstString string_value;
 		u64 integer_value;
 	};
 };
+
+template<typename AllocatorType>
+void write(String* buffer, Token token, AllocatorType* allocator) {
+	switch (token.kind) {
+		case TokenKind::keyword: {
+			write(buffer, "Keyword (", allocator);
+			write(buffer, keyword_strings[(fuint)token.keyword_value], allocator);
+			write(buffer, ")", allocator);
+		} break;
+		
+		case TokenKind::integer: {
+			write(buffer, "Integer (", allocator);
+			write_uint(buffer, token.integer_value, allocator);
+			write(buffer, ")", allocator);
+		} break;
+		
+		case TokenKind::string: {
+			write(buffer, "String (", allocator);
+			write(buffer, token.string_value, allocator);
+			write(buffer, ")", allocator);
+		} break;
+		
+		case TokenKind::identifier: {
+			write(buffer, "Identifier (", allocator);
+			write(buffer, token.identifier_value, allocator);
+			write(buffer, ")", allocator);
+		} break;
+		
+		default: {
+			fox_unreachable;
+		} break;
+	}
+}
 
 Optional<Array<Token>> lex(String source) {
 	fox_assert(source);
@@ -882,8 +928,8 @@ Optional<Array<Token>> lex(String source) {
 		}
 	}
 	
-	char* cursor = source.data;
-	char* source_end = source.data + source.length;
+	auto cursor = source.data;
+	auto source_end = source.data + source.length;
 	
 	while (cursor < source_end) {
 		//Skip whitespace
@@ -897,16 +943,16 @@ Optional<Array<Token>> lex(String source) {
 		//Check for operators
 		if (is_operator_character(cursor)) {
 			auto operator_start = cursor;
-			auto operator_end = operator_start;
-			while (operator_end < source_end && is_operator_character(operator_end)) {
-				operator_end++;
+			while (cursor < source_end && is_operator_character(cursor)) {
+				cursor++;
 			}
 			
 			ConstString operator_string;
+			zero(&operator_string);
 			operator_string.data = operator_start;
-			operator_string.length = operator_end - operator_start;
+			operator_string.length = cursor - operator_start;
 			
-			auto keyword_index_optional = find(keyword_values, operator_string);
+			auto keyword_index_optional = find(Array<ConstString>(keyword_strings), operator_string);
 			if (keyword_index_optional) {
 				auto new_token = push_zero(&tokens, &heap_stack);
 				new_token->kind = TokenKind::keyword;
@@ -914,9 +960,9 @@ Optional<Array<Token>> lex(String source) {
 			} else {
 				String error_message;
 				zero(&error_message);
-				push_array(&error_message, "Syntax error: ", &heap_stack);
-				push_array(&error_message, operator_string, &heap_stack);
-				push_array(&error_message, " is not a valid operator.\n", &heap_stack);
+				write(&error_message, "Syntax error: ", &heap_stack);
+				write(&error_message, operator_string, &heap_stack);
+				write(&error_message, " is not a valid operator.\n", &heap_stack);
 				print(error_message);
 				return nil;
 			}
@@ -925,16 +971,44 @@ Optional<Array<Token>> lex(String source) {
 		//Check for numbers
 		else if (is_number_character(cursor)) {
 			auto number_start = cursor;
-			auto number_end = number_start;
-			while (number_end < source_end && is_number_character(number_end)) {
-				number_end++;
+			while (cursor < source_end && is_number_character(cursor)) {
+				cursor++;
 			}
 			
-			ConstString number_string;
-			number_string.data = number_start;
-			number_string.length = number_end - number_start;
+			if (cursor == source_end || is_space_character(cursor)) {
+				ConstString number_string;
+				zero(&number_string);
+				number_string.data = number_start;
+				number_string.length = cursor - number_start;
+				
+				u64 integer_value = unsigned_integer_from_string(number_string);
+				
+				auto new_token = push_zero(&tokens, &heap_stack);
+				new_token->kind = TokenKind::integer;
+				new_token->integer_value = integer_value;
+			} else {
+				print("Syntax error: Expected whitespace or end-of-file after integer literal.\n");
+				return nil;
+			}
+		}
+		
+		//anything else is considered an identifier character
+		else {
+			fox_assert(is_identifier_character(cursor));
 			
+			auto identifier_start = cursor;
+			while (cursor < source_end && is_identifier_character(cursor)) {
+				cursor++;
+			}
 			
+			ConstString identifier;
+			zero(&identifier);
+			identifier.data = identifier_start;
+			identifier.length = cursor - identifier_start;
+			
+			auto new_token = push_zero(&tokens, &heap_stack);
+			new_token->kind = TokenKind::identifier;
+			new_token->identifier_value = identifier;
 		}
 	}
 	
@@ -945,7 +1019,7 @@ int main(int argument_count, char** arguments) {
 	test_foxlib();
 	
 	u64 memory_size = mebibytes(1);
-	initialize(&heap_stack, malloc(memory_size), memory_size);
+	initialize(&heap_stack, calloc(memory_size, 1), memory_size);
 	
 	if (argument_count > 1) {
 		ConstString file_path = arguments[1];
@@ -954,24 +1028,33 @@ int main(int argument_count, char** arguments) {
 		auto file_read_status = read_entire_file(file_path.data, &heap_stack, &file_data);
 		switch (file_read_status) {
 			case FileStatus::read: {
-				print(fox_interpret_cast(ConstString, file_data));
+				auto file_string = fox_interpret_cast(String, file_data);
+				auto tokens = lex(file_string);
+				fox_assert(tokens);
+				String tokenized_file;
+				zero(&tokenized_file);
+				fox_for (itoken, tokens.value.length) {
+					write(&tokenized_file, tokens.value[itoken], &heap_stack);
+					write(&tokenized_file, "\n", &heap_stack);
+				}
+				print(tokenized_file);
 			} break;
 			
 			case FileStatus::empty: {
 				String error_message;
 				zero(&error_message);
-				push_array(&error_message, "File ", &heap_stack);
-				push_array(&error_message, file_path, &heap_stack);
-				push_array(&error_message, " is empty!\n", &heap_stack);
+				write(&error_message, "File ", &heap_stack);
+				write(&error_message, file_path, &heap_stack);
+				write(&error_message, " is empty!\n", &heap_stack);
 				print(error_message);
 			} break;
 			
 			case FileStatus::error: {
 				String error_message;
 				zero(&error_message);
-				push_array(&error_message, "File ", &heap_stack);
-				push_array(&error_message, file_path, &heap_stack);
-				push_array(&error_message, " is inaccessible!\n", &heap_stack);
+				write(&error_message, "File ", &heap_stack);
+				write(&error_message, file_path, &heap_stack);
+				write(&error_message, " is inaccessible!\n", &heap_stack);
 				print(error_message);
 			} break;
 			
