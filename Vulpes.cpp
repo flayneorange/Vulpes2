@@ -1,5 +1,6 @@
 #include <iostream>
 #include <cstdint>
+#include <limits>
 
 //---Library
 
@@ -23,6 +24,7 @@ typedef s64 fint;
 typedef u64 fuint;
 
 //---Utilities
+//@todo safe memcpy that checks for overlaps? nicer aliases of those functions?
 #define fox_for(iterator_name, count) for (fuint iterator_name = 0; iterator_name < count; ++iterator_name)
 
 #define fox_unreachable (*(fuint*)0) = 0
@@ -37,20 +39,47 @@ internal void zero(Type* value) {
 	memset(value, 0, sizeof(Type));
 }
 
-#define kibibytes(amount) ((amount) * 1024)
-#define mebibytes(amount) (kibibytes(amount) * 1024)
-#define gibibytes(amount) (mebibytes(amount) * 1024)
-#define tebibytes(amount) (gibibytes(amount) * 1024)
-#define pebibytes(amount) (tebibytes(amount) * 1024)
-#define exbibytes(amount) (pebibytes(amount) * 1024)
-#define zebibytes(amount) (exbibytes(amount) * 1024)
-#define yobibytes(amount) (zebibytes(amount) * 1024)
+internal u64 kibibytes(u64 amount) {
+	fox_assert(amount < (1ull << 55));
+	return amount << 10;
+}
+internal u64 mebibytes(u64 amount) {
+	fox_assert(amount < (1ull << 45));
+	return amount << 20;
+}
+internal u64 gibibytes(u64 amount) {
+	fox_assert(amount < (1ull << 35));
+	return amount << 30;
+}
+internal u64 tebibytes(u64 amount) {
+	fox_assert(amount < (1ull << 25));
+	return amount << 40;
+}
+internal u64 pebibytes(u64 amount) {
+	fox_assert(amount < (1ull << 15));
+	return amount << 50;
+}
+internal u64 exbibytes(u64 amount) {
+	fox_assert(amount < (1ull << 5));
+	return amount << 60;
+}
+
+internal u64 absolute_value(s64 integer) {
+	return (u64)(integer < 0 ? -integer : integer);
+}
+
+void test_utilities() {
+	fox_assert(kibibytes(1) == 1024);
+	fox_assert(mebibytes(1) == kibibytes(1) * 1024);
+	fox_assert(gibibytes(1) == mebibytes(1) * 1024);
+	fox_assert(tebibytes(1) == gibibytes(1) * 1024);
+	fox_assert(pebibytes(1) == tebibytes(1) * 1024);
+	fox_assert(exbibytes(1) == pebibytes(1) * 1024);
+}
 
 //---Optional
-struct NilType {
-};
-//@todo const this
-NilType nil;
+//This is used to represent an optional without a value
+constexpr struct NilType {} nil;
 
 template<typename ValueType>
 struct Optional {
@@ -82,18 +111,24 @@ void test_optionals() {
 }
 
 //---Array
+template<typename ElementType, fuint capacity> struct InternalArray;
+
 template<typename ElementType>
 struct Array {
 	typedef ElementType ElementTypeMember;
 	
-	ElementType* data;
 	u64 length;
+	ElementType* data;
 	
 	Array() = default;
 	Array(const Array<ElementType>& other) = default;
 	template<fuint c_array_length> Array(ElementType (&c_array)[c_array_length]) {
 		data = c_array;
 		length = c_array_length;
+	}
+	template<fuint capacity> Array(InternalArray<ElementType, capacity>& other) {
+		data = other.data;
+		length = other.length;
 	}
 	
 	ElementType& operator[](fuint index) const {
@@ -110,9 +145,43 @@ struct Array {
 	}
 };
 
+template<typename ElementType, fuint capacity>
+struct InternalArray {
+	typedef ElementType ElementTypeMember;
+	
+	u64 length;
+	ElementType data[capacity];
+	
+	InternalArray() = default;
+	InternalArray(const InternalArray<ElementType, capacity>& other) = default;
+	InternalArray(const Array<ElementType>& other) {
+		array_copy(this, other);
+	}
+	InternalArray(const Array<const ElementType>& other) {
+		array_copy(this, other);
+	}
+	
+	ElementType& operator[](fuint index) {
+		fox_assert(index < length);
+		return data[index];
+	}
+	ElementType& get(fuint index) {
+		fox_assert(index < length);
+		return data[index];
+	}
+	
+	operator bool() const {
+		return length != 0;
+	}
+};
+
 struct String : Array<char> {
 	String() = default;
 	String(const String& other) = default;
+	String(const Array<char>& other) {
+		data = other.data;
+		length = other.length;
+	}
 	template<fuint c_string_length> String(char (&c_string)[c_string_length]) {
 		data = c_string;
 		//Good god C++ why???
@@ -124,6 +193,14 @@ struct String : Array<char> {
 struct ConstString : Array<const char> {
 	ConstString() = default;
 	ConstString(const ConstString& other) = default;
+	ConstString(const Array<const char>& other) {
+		data = other.data;
+		length = other.length;
+	}
+	ConstString(const Array<char>& other) {
+		data = other.data;
+		length = other.length;
+	}
 	ConstString(const String& other) {
 		data = other.data;
 		length = other.length;
@@ -138,8 +215,64 @@ struct ConstString : Array<const char> {
 	}
 };
 
+template<fuint capacity>
+struct InternalString : InternalArray<char, capacity> {
+	InternalString() = default;
+	InternalString(const InternalString& other) = default;
+	InternalString(const String& other) {
+		array_copy(this, other);
+	}
+	InternalString(const ConstString& other) {
+		array_copy(this, other);
+	}
+	template<fuint c_string_length> InternalString(const char (&c_string)[c_string_length]) {
+		array_copy(this, c_string, c_string_length - 1);
+	}
+};
+
 template<typename ArrayType>
-internal Optional<fuint> find(ArrayType array, typename ArrayType::ElementTypeMember element) {
+internal Array<typename ArrayType::ElementTypeMember> sub_array(const ArrayType& array, fuint start, fuint end) {
+	fox_assert(start < array.length);
+	fox_assert(end <= array.length);
+	fox_assert(start <= end);
+	
+	Array<typename ArrayType::ElementTypeMember> result;
+	result.data = array.data + start;
+	result.length = end - start;
+	return result;
+}
+
+template<typename ArrayType>
+internal Array<typename ArrayType::ElementTypeMember> sub_array(const ArrayType& array, fuint start) {
+	return sub_array(array, start, array.length);
+}
+
+//These never allocate, thus if an array is used it must already have a data buffer ready to recieve the copy
+template<typename DestinationArrayType>
+internal void array_copy(DestinationArrayType* destination, const typename DestinationArrayType::ElementTypeMember* source_data, fuint source_length) {
+	memcpy(destination->data, source_data, source_length * sizeof(DestinationArrayType::ElementTypeMember));
+	destination->length = source_length;
+}
+
+template<typename ElementType, fuint capacity, typename SourceArrayType>
+internal void array_copy(InternalArray<ElementType, capacity>* destination, const SourceArrayType& source) {
+	fox_assert(capacity >= source.length);
+	array_copy(destination, source.data, source.length);
+}
+
+template<typename ElementType, fuint capacity, typename SourceArrayType>
+internal void array_copy(Array<ElementType>* destination, const SourceArrayType& source) {
+	fox_assert(destination.length >= source.length);
+	array_copy(destination, source.data, source.length);
+}
+
+template<typename ElementType>
+internal bool array_equals(const ElementType* data0, fuint length0, const ElementType* data1, fuint length1) {
+	return length0 == length1 && memcmp(data0, data1, length0 * sizeof(ElementType)) == 0;
+}
+
+template<typename ArrayType>
+internal Optional<fuint> find(const ArrayType& array, const typename ArrayType::ElementTypeMember& element) {
 	fox_for (index, array.length) {
 		if (array[index] == element) {
 			return index;
@@ -148,41 +281,85 @@ internal Optional<fuint> find(ArrayType array, typename ArrayType::ElementTypeMe
 	return nil;
 }
 
-template<typename ElementType>
-internal bool array_equals(const ElementType* data0, fuint length0, const ElementType* data1, fuint length1) {
-	if (length0 == length1) {
-		return memcmp(data0, data1, length0 * sizeof(ElementType)) == 0;
-	}
-	return false;
-}
-
+//@todo replace with <=> operator when available
 template<typename ElementType0, typename ElementType1>
-internal bool operator==(Array<ElementType0> array0, Array<ElementType1> array1) {
+internal bool operator==(const Array<ElementType0>& array0, const Array<ElementType1> array1) {
 	return array_equals(array0.data, array0.length, array1.data, array1.length);
 }
 
+template<typename ElementType0, fuint capacity0, typename ElementType1, fuint capacity1>
+internal bool operator==(const InternalArray<ElementType0, capacity0> array0, const InternalArray<ElementType1, capacity1> array1) {
+	return array_equals(array0.data, array0.length, array1.data, array1.length);
+}
+
+template<typename ElementType0, typename ElementType1, fuint capacity1>
+internal bool operator==(const Array<ElementType0> array0, const InternalArray<ElementType1, capacity1> array1) {
+	return array_equals(array0.data, array0.length, array1.data, array1.length);
+}
+
+template<typename ElementType0, fuint capacity0, typename ElementType1>
+internal bool operator==(const InternalArray<ElementType0, capacity0> array0, const Array<ElementType1> array1) {
+	return array_equals(array0.data, array0.length, array1.data, array1.length);
+}
+
+template<typename ElementType, typename fuint c_string_length>
+internal bool operator==(const Array<ElementType> array, const char (&c_string)[c_string_length]) {
+	return array_equals(array.data, array.length, c_string, c_string_length - 1);
+}
+
+template<typename ElementType, typename fuint c_string_length>
+internal bool operator==(const char (&c_string)[c_string_length], const Array<ElementType> array) {
+	return array_equals(array.data, array.length, c_string, c_string_length - 1);
+}
+
+template<typename ElementType, fuint capacity, typename fuint c_string_length>
+internal bool operator==(const InternalArray<ElementType, capacity> array, const char (&c_string)[c_string_length]) {
+	return array_equals(array.data, array.length, c_string, c_string_length - 1);
+}
+
+template<typename ElementType, fuint capacity, typename fuint c_string_length>
+internal bool operator==(const char (&c_string)[c_string_length], const InternalArray<ElementType, capacity> array) {
+	return array_equals(array.data, array.length, c_string, c_string_length - 1);
+}
+
+//@todo replace with <=> operator when available
 template<typename ElementType0, typename ElementType1>
-internal bool operator!=(Array<ElementType0> array0, Array<ElementType1> array1) {
+internal bool operator!=(const Array<ElementType0>& array0, const Array<ElementType1> array1) {
+	return !array_equals(array0.data, array0.length, array1.data, array1.length);
+}
+
+template<typename ElementType0, fuint capacity0, typename ElementType1, fuint capacity1>
+internal bool operator!=(const InternalArray<ElementType0, capacity0> array0, const InternalArray<ElementType1, capacity1> array1) {
+	return !array_equals(array0.data, array0.length, array1.data, array1.length);
+}
+
+template<typename ElementType0, typename ElementType1, fuint capacity1>
+internal bool operator!=(const Array<ElementType0> array0, const InternalArray<ElementType1, capacity1> array1) {
+	return !array_equals(array0.data, array0.length, array1.data, array1.length);
+}
+
+template<typename ElementType0, fuint capacity0, typename ElementType1>
+internal bool operator!=(const InternalArray<ElementType0, capacity0> array0, const Array<ElementType1> array1) {
 	return !array_equals(array0.data, array0.length, array1.data, array1.length);
 }
 
 template<typename ElementType, typename fuint c_string_length>
-internal bool operator==(Array<ElementType> array, const char (&c_string)[c_string_length]) {
-	return array_equals(array.data, array.length, c_string, c_string_length - 1);
-}
-
-template<typename ElementType, typename fuint c_string_length>
-internal bool operator!=(Array<ElementType> array, const char (&c_string)[c_string_length]) {
+internal bool operator!=(const Array<ElementType> array, const char (&c_string)[c_string_length]) {
 	return !array_equals(array.data, array.length, c_string, c_string_length - 1);
 }
 
 template<typename ElementType, typename fuint c_string_length>
-internal bool operator==(const char (&c_string)[c_string_length], Array<ElementType> array) {
-	return array_equals(array.data, array.length, c_string, c_string_length - 1);
+internal bool operator!=(const char (&c_string)[c_string_length], const Array<ElementType> array) {
+	return !array_equals(array.data, array.length, c_string, c_string_length - 1);
 }
 
-template<typename ElementType, typename fuint c_string_length>
-internal bool operator!=(const char (&c_string)[c_string_length], Array<ElementType> array) {
+template<typename ElementType, fuint capacity, typename fuint c_string_length>
+internal bool operator!=(const InternalArray<ElementType, capacity> array, const char (&c_string)[c_string_length]) {
+	return !array_equals(array.data, array.length, c_string, c_string_length - 1);
+}
+
+template<typename ElementType, fuint capacity, typename fuint c_string_length>
+internal bool operator!=(const char (&c_string)[c_string_length], const InternalArray<ElementType, capacity> array) {
 	return !array_equals(array.data, array.length, c_string, c_string_length - 1);
 }
 
@@ -191,10 +368,32 @@ internal void print(ConstString message) {
 }
 
 internal void test_arrays() {
+	//Test string conversion
 	ConstString test_hello = "hello";
+	char hello_variable[] = "hello";
+	String test_hello_string = hello_variable;
+	InternalString<5> test_hello_internal_string = "hello";
 	fox_assert(test_hello.length == 5);
-	fox_assert(test_hello == "hello");
+	fox_assert(test_hello_string.length == 5);
+	fox_assert(test_hello_internal_string.length == 5);
 	
+	//Test array char/string promotion
+	Array<const char> test_hello_char_array;
+	test_hello_char_array.data = hello_variable;
+	test_hello_char_array.length = 5;
+	fox_assert(test_hello_char_array == ConstString(test_hello_char_array));
+	
+	//Test equality
+	fox_assert(test_hello == test_hello && !(test_hello != test_hello));
+	fox_assert(test_hello_internal_string == test_hello_internal_string && !(test_hello_internal_string != test_hello_internal_string));
+	fox_assert(test_hello == "hello");
+	fox_assert(test_hello_string == "hello");
+	fox_assert(test_hello_internal_string == "hello");
+	fox_assert(test_hello == test_hello_string);
+	fox_assert(test_hello_string == test_hello_internal_string);
+	fox_assert(test_hello_internal_string == test_hello);
+	
+	//Test find
 	auto h_index = find(test_hello, 'h');
 	fox_assert(h_index);
 	fox_assert(h_index.value == 0);
@@ -206,6 +405,135 @@ internal void test_arrays() {
 	fox_assert(o_index.value == 4);
 	auto z_index = find(test_hello, 'z');
 	fox_assert(!z_index);
+	
+	//Test (internal)array conversions and operations
+	InternalArray<u64, 2> two_u64s;
+	static_assert(sizeof(two_u64s.data) == 2 * sizeof(u64));
+	zero(&two_u64s);
+	two_u64s.length = 2;
+	two_u64s[0] = 1;
+	two_u64s[1] = 2;
+	fox_assert(two_u64s == two_u64s && !(two_u64s != two_u64s));
+	
+	Array<u64> two_u64s_not_internal = two_u64s;
+	fox_assert(two_u64s_not_internal == two_u64s_not_internal && !(two_u64s_not_internal != two_u64s_not_internal));
+	fox_assert(two_u64s_not_internal.length == 2);
+	fox_assert(two_u64s == two_u64s_not_internal);
+	
+	//Array = internal should set pointers, not copy
+	two_u64s[0] = 10;
+	fox_assert(two_u64s_not_internal[0] == 10);
+	fox_assert(two_u64s_not_internal[1] == 2);
+	
+	//internal = array should copy because it cant set pointers because there aren't pointers
+	InternalArray<u64, 2> two_more_u64s = two_u64s_not_internal;
+	two_more_u64s[0] = 1;
+	fox_assert(two_u64s[0] == 10);
+	fox_assert(two_more_u64s[0] == 1);
+	fox_assert(two_more_u64s[1] == 2);
+}
+
+//---String conversion
+constexpr fuint max_unsigned_integer_string_length = 20;
+constexpr fuint max_signed_integer_string_length = 20;
+
+internal u64 unsigned_integer_from_string(ConstString integer_string) {
+	fox_assert(1 <= integer_string.length && integer_string.length <= max_unsigned_integer_string_length);
+	u64 result = 0;
+	u64 exponent = 1;
+	for (s64 integer_string_index = (s64)(integer_string.length - 1); integer_string_index >= 0; --integer_string_index) {
+		auto digit_character = integer_string[integer_string_index];
+		fox_assert('0' <= digit_character && digit_character <= '9');
+		u64 digit = digit_character - '0';
+		result += digit * exponent;
+		exponent *= 10;
+	}
+	return result;
+}
+
+internal s64 signed_integer_from_string(ConstString integer_string) {
+	fox_assert(1 <= integer_string.length && integer_string.length <= max_signed_integer_string_length);
+	
+	//First parse the unsigned part
+	auto is_negative = integer_string[0] == '-';
+	ConstString unsigned_integer_string = is_negative ? sub_array(integer_string, 1) : integer_string;
+	u64 unsigned_integer = unsigned_integer_from_string(unsigned_integer_string);
+	
+	//Check that the absolute_value is ok for a signed value
+	fox_assert(unsigned_integer <= (is_negative ? (1ull << 63) : ((1ull << 63) - 1)));
+	
+	//Return with appropriate sign
+	return is_negative ? -(s64)unsigned_integer : (s64)unsigned_integer;
+}
+
+//internal helper for string_from_unsigned_integer
+//out_buffer is written to back to front and 
+internal char* write_string_from_unsigned_integer(char* buffer_end, u64 integer) {
+	auto cursor = buffer_end;
+	do {
+		cursor--;
+		auto digit = (u8)(integer % 10);
+		auto digit_character = (char)(digit + '0');
+		*cursor = digit_character;
+		integer /= 10;
+	} while (integer);
+	return cursor;
+}
+
+internal InternalString<max_unsigned_integer_string_length> string_from_unsigned_integer(u64 integer) {
+	InternalString<max_unsigned_integer_string_length> integer_string;
+	zero(&integer_string);
+	
+	auto buffer_end = integer_string.data + max_unsigned_integer_string_length;
+	auto buffer_start = write_string_from_unsigned_integer(buffer_end, integer);
+	
+	auto length = buffer_end - buffer_start;
+	memmove(integer_string.data, buffer_start, length);
+	integer_string.length = length;
+	return integer_string;
+}
+
+internal InternalString<max_signed_integer_string_length> string_from_signed_integer(s64 integer) {
+	InternalString<max_signed_integer_string_length> integer_string;
+	zero(&integer_string);
+	
+	auto buffer_end = integer_string.data + max_signed_integer_string_length;
+	auto integer_absolute_value = absolute_value(integer);
+	auto buffer_start = write_string_from_unsigned_integer(buffer_end, integer_absolute_value);
+	
+	if (integer < 0) {
+		buffer_start--;
+		*buffer_start = '-';
+	}
+	
+	auto length = buffer_end - buffer_start;
+	memmove(integer_string.data, buffer_start, length);
+	integer_string.length = length;
+	return integer_string;
+}
+
+internal void test_string_conversion() {
+	fox_assert(unsigned_integer_from_string("0") == 0ull);
+	fox_assert(unsigned_integer_from_string("69") == 69ull);
+	fox_assert(unsigned_integer_from_string("420") == 420ull);
+	fox_assert(unsigned_integer_from_string("18446744073709551615") == 18446744073709551615ull);
+	
+	fox_assert(string_from_unsigned_integer(0ull) == "0");
+	fox_assert(string_from_unsigned_integer(69ull) == "69");
+	fox_assert(string_from_unsigned_integer(420ull) == "420");
+	fox_assert(string_from_unsigned_integer(18446744073709551615ull) == "18446744073709551615");
+	
+	fox_assert(signed_integer_from_string("-9223372036854775808") == -9223372036854775808ll);
+	fox_assert(signed_integer_from_string("-69") == -69ll);
+	fox_assert(signed_integer_from_string("0") == 0ll);
+	fox_assert(signed_integer_from_string("420") == 420ll);
+	fox_assert(signed_integer_from_string("9223372036854775807") == 9223372036854775807ll);
+	
+	fox_assert(string_from_signed_integer(-9223372036854775808ll) == "-9223372036854775808");
+	fox_assert(string_from_signed_integer(-69ll) == "-69");
+	fox_assert(string_from_signed_integer(0ll) == "0");
+	fox_assert(string_from_signed_integer(420ll) == "420");
+	fox_assert(string_from_signed_integer(9223372036854775807ll) == "9223372036854775807");
 }
 
 //---Allocators
@@ -224,23 +552,30 @@ struct LinearAllocatorRestorePoint {
 	u8* old_cursor;
 };
 
-internal void initialize(LinearAllocator* allocator, void* memory, fuint size) {
-	allocator->start = allocator->cursor = (u8*)memory;
-	allocator->end = (u8*)memory + size;
+internal void initialize(LinearAllocator* allocator, void* zero_initialized_memory, fuint size) {
+	allocator->start = allocator->cursor = (u8*)zero_initialized_memory;
+	allocator->end = (u8*)zero_initialized_memory + size;
 }
 
-internal void initialize(LinearAllocator* allocator, Array<u8> memory) {
-	initialize(allocator, memory.data, memory.length);
+internal void initialize(LinearAllocator* allocator, Array<u8> zero_initialized_memory) {
+	initialize(allocator, zero_initialized_memory.data, zero_initialized_memory.length);
+}
+
+internal void fox_assert_memory_is_zero(u8* memory, fuint size) {
+	fox_for (memory_index, size) {
+		fox_assert(!memory[memory_index]);
+	}
 }
 
 internal void* allocate_block(LinearAllocator* allocator, fuint size, fuint align) {
 	fox_assert(align);
 	
 	allocator->cursor = (u8*)align_offset_up((fuint)allocator->cursor, align);
-	auto result = (void*)allocator->cursor;
+	auto result = allocator->cursor;
 	allocator->cursor += size;
 	fox_assert(allocator->cursor < allocator->end);
-	return result;
+	fox_assert_memory_is_zero(result, size);
+	return (void*)result;
 }
 
 internal void* reallocate_block(LinearAllocator* allocator, void* old_block, fuint old_size, fuint new_size, fuint align) {
@@ -251,7 +586,10 @@ internal void* reallocate_block(LinearAllocator* allocator, void* old_block, fui
 		//We should already be aligned since the last allocation should have had the same alignment
 		fox_assert(allocator->cursor == (u8*)align_offset_up((fuint)allocator->cursor, align));
 		
-		allocator->cursor += new_size - old_size;
+		auto new_memory = allocator->cursor;
+		auto size_difference = new_size - old_size;
+		fox_assert_memory_is_zero(new_memory, size_difference);
+		allocator->cursor += size_difference;
 		return old_block;
 	}
 	
@@ -268,7 +606,11 @@ internal LinearAllocatorRestorePoint create_restore_point(LinearAllocator* alloc
 }
 
 internal void restore(LinearAllocator* allocator, LinearAllocatorRestorePoint restore_point) {
-	allocator->cursor = restore_point.old_cursor;
+	auto old_cursor = restore_point.old_cursor;
+	auto current_cursor = allocator->cursor;
+	fox_assert(current_cursor >= old_cursor);
+	memset(old_cursor, 0, current_cursor - old_cursor);
+	allocator->cursor = old_cursor;
 }
 
 template<typename Type, typename AllocatorType>
@@ -286,32 +628,32 @@ internal Array<Type> allocate_array(fuint length, AllocatorType* allocator) {
 }
 
 internal void test_allocators() {
-	//Test initialization, we aren't using an actual buffer here because it doesn't matter
-	constexpr fuint memory_size = 1024;
-	u8 memory_buffer[memory_size];
-	
+	//Test initialization
+	InternalArray<u8, 1024> memory;
+	zero(&memory);
+	memory.length = 1024;
 	LinearAllocator test_allocator;
-	initialize(&test_allocator, memory_buffer, memory_size);
-	fox_assert(test_allocator.start == memory_buffer);
+	initialize(&test_allocator, memory);
+	fox_assert(test_allocator.start == memory.data);
 	fox_assert(test_allocator.start == test_allocator.cursor);
-	fox_assert(test_allocator.end == memory_buffer + memory_size);
+	fox_assert(test_allocator.end == memory.data + memory.length);
 	
 	//Test allocation
 	auto test_restore = create_restore_point(&test_allocator);
 	allocate<u32>(&test_allocator);
-	fox_assert(test_allocator.cursor == memory_buffer + 4);
+	fox_assert(test_allocator.cursor == memory.data + 4);
 	allocate<u8>(&test_allocator);
-	fox_assert(test_allocator.cursor == memory_buffer + 5);
+	fox_assert(test_allocator.cursor == memory.data + 5);
 	allocate<u16>(&test_allocator);
-	fox_assert(test_allocator.cursor == memory_buffer + 8);
+	fox_assert(test_allocator.cursor == memory.data + 8);
 	allocate_array<u64>(3, &test_allocator);
-	fox_assert(test_allocator.cursor == memory_buffer + 32);
+	fox_assert(test_allocator.cursor == memory.data + 32);
 	
 	//Test restore
 	restore(&test_allocator, test_restore);
 	
 	//Test reallocation
-	fox_assert(test_allocator.cursor == memory_buffer);
+	fox_assert(test_allocator.cursor == memory.data);
 	auto allocated_memory = allocate<u16>(&test_allocator);
 	*allocated_memory = 0xdead;
 	auto reallocated_memory = reallocate_block(&test_allocator, allocated_memory, 2, 4, 2);
@@ -323,9 +665,8 @@ internal void test_allocators() {
 	allocate<u16>(&test_allocator);
 	reallocated_memory = reallocate_block(&test_allocator, allocated_memory, 2, 4, 2);
 	fox_assert(allocated_memory != reallocated_memory);
-	fox_assert(*allocated_memory == 0xdead);
-	fox_assert(reallocated_memory == memory_buffer + 4);
-	fox_assert(test_allocator.cursor == memory_buffer + 8);
+	fox_assert(reallocated_memory == memory.data + 4);
+	fox_assert(test_allocator.cursor == memory.data + 8);
 }
 
 //---Dynamic Arrays
@@ -404,6 +745,7 @@ internal void test_dynamic_arrays() {
 	
 	//Make sure the same functions work on strings
 	String hello_seven;
+	zero(&hello_seven);
 	push_array(&hello_seven, "hello", &test_allocator);
 	push_array(&hello_seven, "7", &test_allocator);
 	fox_assert(hello_seven == ConstString("hello7"));
@@ -466,8 +808,10 @@ internal void test_file_io() {
 }
 
 internal void test_foxlib() {
-	//library tests
+	test_utilities();
+	test_optionals();
 	test_arrays();
+	test_string_conversion();
 	test_allocators();
 	test_dynamic_arrays();
 	test_file_io();
@@ -551,7 +895,7 @@ Optional<Array<Token>> lex(String source) {
 		}
 		
 		//Check for operators
-		{
+		if (is_operator_character(cursor)) {
 			auto operator_start = cursor;
 			auto operator_end = operator_start;
 			while (operator_end < source_end && is_operator_character(operator_end)) {
@@ -576,6 +920,21 @@ Optional<Array<Token>> lex(String source) {
 				print(error_message);
 				return nil;
 			}
+		}
+		
+		//Check for numbers
+		else if (is_number_character(cursor)) {
+			auto number_start = cursor;
+			auto number_end = number_start;
+			while (number_end < source_end && is_number_character(number_end)) {
+				number_end++;
+			}
+			
+			ConstString number_string;
+			number_string.data = number_start;
+			number_string.length = number_end - number_start;
+			
+			
 		}
 	}
 	
