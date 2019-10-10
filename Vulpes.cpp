@@ -835,6 +835,50 @@ internal void test_foxlib() {
 //---Vulpes
 LinearAllocator heap_stack;
 
+//---SourceSite
+struct SourceSite {
+	ConstString path;
+	String source;
+	u64 line;
+	char* line_start;
+	u64 column;
+};
+
+template<typename AllocatorType>
+void write(String* buffer, SourceSite source_site, AllocatorType* allocator) {
+	write(buffer, "File: ", allocator);
+	write(buffer, source_site.path, allocator);
+	write(buffer, " line ", allocator);
+	write_uint(buffer, source_site.line, allocator);
+	write(buffer, " column ", allocator);
+	write_uint(buffer, source_site.column, allocator);
+	write(buffer, "\n", allocator);
+	
+	//print the line
+	//@todo print context
+	//@todo print error as range rather than just start
+	auto line_end = source_site.line_start;
+	auto source_end = source_site.source.data + source_site.source.length;
+	while (line_end < source_end && *line_end != '\n') {
+		line_end++;
+	}
+	
+	String line;
+	zero(&line);
+	line.data = source_site.line_start;
+	line.length = line_end - source_site.line_start;
+	write(buffer, line, allocator);
+	write(buffer, "\n", allocator);
+	
+	//print a cursor to the start of the site
+	//-------------------------------^
+	fox_for (source_index, source_site.column - 1) {
+		write(buffer, "-", allocator);
+	}
+	write(buffer, "^", allocator);
+	write(buffer, "\n", allocator);
+}
+
 //---Lexer
 bool is_space_character(char* character) {
 	return *character <= ' ';
@@ -864,7 +908,7 @@ ConstString keyword_strings[] = {
 	"+",
 };
 
-enum class TokenKind {
+enum class TokenKind : u8 {
 	invalid,
 	keyword,
 	integer,
@@ -873,13 +917,14 @@ enum class TokenKind {
 };
 
 struct Token {
-	TokenKind kind;
+	SourceSite source_site;
 	union {
 		Keyword keyword_value;
 		ConstString identifier_value;
 		ConstString string_value;
 		u64 integer_value;
 	};
+	TokenKind kind;
 };
 
 template<typename AllocatorType>
@@ -915,7 +960,7 @@ void write(String* buffer, Token token, AllocatorType* allocator) {
 	}
 }
 
-Optional<Array<Token>> lex(String source) {
+Optional<Array<Token>> lex(String source, ConstString path) {
 	fox_assert(source);
 	
 	Array<Token> tokens;
@@ -935,23 +980,51 @@ Optional<Array<Token>> lex(String source) {
 	
 	auto cursor = source.data;
 	auto source_end = source.data + source.length;
+	SourceSite site_cursor;
+	zero(&site_cursor);
+	site_cursor.path = path;
+	site_cursor.source = source;
+	site_cursor.line = 1;
+	site_cursor.line_start = source.data;
+	site_cursor.column = 1;
+	
+	auto increment_cursor = [&]() {
+		cursor++;
+		site_cursor.column++;
+	};
 	
 	while (cursor < source_end) {
 		//Skip whitespace
 		while (is_space_character(cursor)) {
-			cursor++;
+			if (*cursor == '\n') {
+				cursor++;
+				site_cursor.line++;
+				site_cursor.line_start = cursor;
+				site_cursor.column = 1;
+			} else {
+				increment_cursor();
+			}
+			
 			if (cursor == source_end) {
 				return tokens;
 			}
 		}
 		
+		auto push_new_token = [&](TokenKind kind, SourceSite source_site) {
+			auto new_token = push_zero(&tokens, &heap_stack);
+			new_token->kind = kind;
+			new_token->source_site = source_site;
+			return new_token;
+		};
+		
 		//Check for operators
 		if (is_operator_character(cursor)) {
+			auto operator_start_site = site_cursor;
 			auto operator_start = cursor;
-			while (cursor < source_end && is_operator_character(cursor)) {
-				cursor++;
-			}
 			
+			while (cursor < source_end && is_operator_character(cursor)) {
+				increment_cursor();
+			}
 			ConstString operator_string;
 			zero(&operator_string);
 			operator_string.data = operator_start;
@@ -959,12 +1032,12 @@ Optional<Array<Token>> lex(String source) {
 			
 			auto keyword_index_optional = find(Array<ConstString>(keyword_strings), operator_string);
 			if (keyword_index_optional) {
-				auto new_token = push_zero(&tokens, &heap_stack);
-				new_token->kind = TokenKind::keyword;
+				auto new_token = push_new_token(TokenKind::keyword, operator_start_site);
 				new_token->keyword_value = (Keyword)keyword_index_optional.value;
 			} else {
 				String error_message;
 				zero(&error_message);
+				write(&error_message, operator_start_site, &heap_stack);
 				write(&error_message, "Syntax error: ", &heap_stack);
 				write(&error_message, operator_string, &heap_stack);
 				write(&error_message, " is not a valid operator.\n", &heap_stack);
@@ -975,12 +1048,13 @@ Optional<Array<Token>> lex(String source) {
 		
 		//Check for numbers
 		else if (is_number_character(cursor)) {
+			auto number_start_site = site_cursor;
 			auto number_start = cursor;
 			while (cursor < source_end && is_number_character(cursor)) {
-				cursor++;
+				increment_cursor();
 			}
 			
-			if (cursor == source_end || is_space_character(cursor)) {
+			if (cursor == source_end || is_space_character(cursor) || is_operator_character(cursor)) {
 				ConstString number_string;
 				zero(&number_string);
 				number_string.data = number_start;
@@ -988,18 +1062,23 @@ Optional<Array<Token>> lex(String source) {
 				
 				u64 integer_value = unsigned_integer_from_string(number_string);
 				
-				auto new_token = push_zero(&tokens, &heap_stack);
-				new_token->kind = TokenKind::integer;
+				auto new_token = push_new_token(TokenKind::integer, number_start_site);
 				new_token->integer_value = integer_value;
 			} else {
-				print("Syntax error: Expected whitespace or end-of-file after integer literal.\n");
+				String error_message;
+				zero(&error_message);
+				write(&error_message, site_cursor, &heap_stack);
+				write(&error_message, "Syntax error: Expected end-of-file, whitespace, or operator after integer literal.\n", &heap_stack);
+				print(error_message);
 				return nil;
 			}
 		}
 		
 		//Check for string literals
 		else if (*cursor == '\'') {
-			cursor++;
+			auto string_start_site = site_cursor;
+			
+			increment_cursor();
 			
 			String string_value;
 			zero(&string_value);
@@ -1007,7 +1086,20 @@ Optional<Array<Token>> lex(String source) {
 			while (true) {
 				if (*cursor == '\\') {
 					if (cursor + 1 == source_end) {
-						print("Syntax error: end of file after escape sequence start.\n");
+						String error_message;
+						zero(&error_message);
+						write(&error_message, site_cursor, &heap_stack);
+						write(&error_message, "Syntax error: end of file after escape sequence start.\n", &heap_stack);
+						print(error_message);
+						return nil;
+					}
+					
+					if (is_space_character(cursor + 1)) {
+						String error_message;
+						zero(&error_message);
+						write(&error_message, site_cursor, &heap_stack);
+						write(&error_message, "Syntax error: whitespace after escape sequence start.\n", &heap_stack);
+						print(error_message);
 						return nil;
 					}
 					
@@ -1027,6 +1119,7 @@ Optional<Array<Token>> lex(String source) {
 						default: {
 							String error_message;
 							zero(&error_message);
+							write(&error_message, site_cursor, &heap_stack);
 							write(&error_message, "Syntax error: unrecognized escape sequence \\", &heap_stack);
 							write_char(&error_message, cursor[1], &heap_stack);
 							write(&error_message, "\n", &heap_stack);
@@ -1037,23 +1130,24 @@ Optional<Array<Token>> lex(String source) {
 					
 					cursor += 2;
 				} else if (*cursor == '\'') {
-					cursor++;
+					increment_cursor();
 					break;
 				} else {
 					write_char(&string_value, *cursor, &heap_stack);
-					cursor++;
+					increment_cursor();
 				}
 				
-				if (cursor < source_end) {
+				if (cursor >= source_end) {
 					String error_message;
 					zero(&error_message);
+					write(&error_message, string_start_site, &heap_stack);
 					write(&error_message, "Syntax error: unexpected end of file inside string.\n", &heap_stack);
 					print(error_message);
+					return nil;
 				}
 			}
 			
-			auto new_token = push_zero(&tokens, &heap_stack);
-			new_token->kind = TokenKind::string;
+			auto new_token = push_new_token(TokenKind::string, string_start_site);
 			new_token->string_value = string_value;
 		}
 		
@@ -1061,9 +1155,10 @@ Optional<Array<Token>> lex(String source) {
 		else {
 			fox_assert(is_identifier_character(cursor));
 			
+			auto identifier_start_site = site_cursor;
 			auto identifier_start = cursor;
 			while (cursor < source_end && is_identifier_character(cursor)) {
-				cursor++;
+				increment_cursor();
 			}
 			
 			ConstString identifier;
@@ -1071,8 +1166,7 @@ Optional<Array<Token>> lex(String source) {
 			identifier.data = identifier_start;
 			identifier.length = cursor - identifier_start;
 			
-			auto new_token = push_zero(&tokens, &heap_stack);
-			new_token->kind = TokenKind::identifier;
+			auto new_token = push_new_token(TokenKind::identifier, identifier_start_site);
 			new_token->identifier_value = identifier;
 		}
 	}
@@ -1094,12 +1188,15 @@ int main(int argument_count, char** arguments) {
 		switch (file_read_status) {
 			case FileStatus::read: {
 				auto file_string = fox_interpret_cast(String, file_data);
-				auto tokens = lex(file_string);
+				auto tokens = lex(file_string, file_path);
 				fox_assert(tokens);
+				
 				String tokenized_file;
 				zero(&tokenized_file);
 				fox_for (itoken, tokens.value.length) {
 					write(&tokenized_file, tokens.value[itoken], &heap_stack);
+					write(&tokenized_file, "\n", &heap_stack);
+					write(&tokenized_file, tokens.value[itoken].source_site, &heap_stack);
 					write(&tokenized_file, "\n", &heap_stack);
 				}
 				print(tokenized_file);
