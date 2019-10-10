@@ -833,6 +833,10 @@ internal void test_foxlib() {
 }
 
 //---Vulpes
+//Program Options
+#define enable_lexer_print 1
+#define enable_parser_print 1
+
 LinearAllocator heap_stack;
 
 //---SourceSite
@@ -845,34 +849,34 @@ struct SourceSite {
 };
 
 template<typename AllocatorType>
-void write(String* buffer, SourceSite source_site, AllocatorType* allocator) {
+void write(String* buffer, SourceSite site, AllocatorType* allocator) {
 	write(buffer, "File: ", allocator);
-	write(buffer, source_site.path, allocator);
+	write(buffer, site.path, allocator);
 	write(buffer, " line ", allocator);
-	write_uint(buffer, source_site.line, allocator);
+	write_uint(buffer, site.line, allocator);
 	write(buffer, " column ", allocator);
-	write_uint(buffer, source_site.column, allocator);
+	write_uint(buffer, site.column, allocator);
 	write(buffer, "\n", allocator);
 	
 	//print the line
 	//@todo print context
 	//@todo print error as range rather than just start
-	auto line_end = source_site.line_start;
-	auto source_end = source_site.source.data + source_site.source.length;
+	auto line_end = site.line_start;
+	auto source_end = site.source.data + site.source.length;
 	while (line_end < source_end && *line_end != '\n') {
 		line_end++;
 	}
 	
 	String line;
 	zero(&line);
-	line.data = source_site.line_start;
-	line.length = line_end - source_site.line_start;
+	line.data = site.line_start;
+	line.length = line_end - site.line_start;
 	write(buffer, line, allocator);
 	write(buffer, "\n", allocator);
 	
 	//print a cursor to the start of the site
 	//-------------------------------^
-	fox_for (source_index, source_site.column - 1) {
+	fox_for (source_index, site.column - 1) {
 		write(buffer, "-", allocator);
 	}
 	write(buffer, "^", allocator);
@@ -917,7 +921,7 @@ enum class TokenKind : u8 {
 };
 
 struct Token {
-	SourceSite source_site;
+	SourceSite site;
 	union {
 		Keyword keyword_value;
 		ConstString identifier_value;
@@ -928,11 +932,16 @@ struct Token {
 };
 
 template<typename AllocatorType>
+void write(String* buffer, Keyword keyword, AllocatorType* allocator) {
+	write(buffer, keyword_strings[(fuint)keyword], allocator);
+}
+
+template<typename AllocatorType>
 void write(String* buffer, Token token, AllocatorType* allocator) {
 	switch (token.kind) {
 		case TokenKind::keyword: {
 			write(buffer, "Keyword (", allocator);
-			write(buffer, keyword_strings[(fuint)token.keyword_value], allocator);
+			write(buffer, token.keyword_value, allocator);
 			write(buffer, ")", allocator);
 		} break;
 		
@@ -958,6 +967,19 @@ void write(String* buffer, Token token, AllocatorType* allocator) {
 			fox_unreachable;
 		} break;
 	}
+}
+
+//Print unexpected end of file at <where> error message
+//Where should end in a line ending
+void print_unexpected_end_of_file(SourceSite site, ConstString where) {
+	fox_assert(where[where.length - 1] == '\n');
+	
+	String error_message;
+	zero(&error_message);
+	write(&error_message, site, &heap_stack);
+	write(&error_message, "Syntax error: unexpected end of file ", &heap_stack);
+	write(&error_message, where, &heap_stack);
+	print(error_message);
 }
 
 Optional<Array<Token>> lex(String source, ConstString path) {
@@ -1010,10 +1032,10 @@ Optional<Array<Token>> lex(String source, ConstString path) {
 			}
 		}
 		
-		auto push_new_token = [&](TokenKind kind, SourceSite source_site) {
+		auto push_new_token = [&](TokenKind kind, SourceSite site) {
 			auto new_token = push_zero(&tokens, &heap_stack);
 			new_token->kind = kind;
-			new_token->source_site = source_site;
+			new_token->site = site;
 			return new_token;
 		};
 		
@@ -1086,11 +1108,7 @@ Optional<Array<Token>> lex(String source, ConstString path) {
 			while (true) {
 				if (*cursor == '\\') {
 					if (cursor + 1 == source_end) {
-						String error_message;
-						zero(&error_message);
-						write(&error_message, site_cursor, &heap_stack);
-						write(&error_message, "Syntax error: end of file after escape sequence start.\n", &heap_stack);
-						print(error_message);
+						print_unexpected_end_of_file(site_cursor, "after escape sequence start.\n");
 						return nil;
 					}
 					
@@ -1138,11 +1156,7 @@ Optional<Array<Token>> lex(String source, ConstString path) {
 				}
 				
 				if (cursor >= source_end) {
-					String error_message;
-					zero(&error_message);
-					write(&error_message, string_start_site, &heap_stack);
-					write(&error_message, "Syntax error: unexpected end of file inside string.\n", &heap_stack);
-					print(error_message);
+					print_unexpected_end_of_file(string_start_site, "inside string.\n");
 					return nil;
 				}
 			}
@@ -1174,6 +1188,209 @@ Optional<Array<Token>> lex(String source, ConstString path) {
 	return tokens;
 }
 
+//---Parser
+enum class SyntaxNodeKind : u8 {
+	BinaryOperation,
+	Identifier,
+	IntegerLiteral,
+	StringLiteral,
+};
+
+struct SyntaxNode {
+	SourceSite* site;
+	SyntaxNodeKind kind;
+};
+
+struct SyntaxNodeBinaryOperation : SyntaxNode {
+	Keyword operator_keyword;
+	SyntaxNode* operands[2];
+};
+
+struct SyntaxNodeIdentifier : SyntaxNode {
+	ConstString identifier;
+};
+
+struct SyntaxNodeIntegerLiteral : SyntaxNode {
+	u64 integer;
+};
+
+struct SyntaxNodeStringLiteral : SyntaxNode {
+	ConstString string;
+};
+
+struct ParseContext {
+	Token* cursor;
+	Token* tokens_end;
+};
+
+internal SyntaxNode* parse_expression(ParseContext* parser);
+internal Optional<Array<SyntaxNode*>> parse(Array<Token> tokens);
+template<typename AllocatorType> internal void write(String* buffer, SyntaxNode* syntax_node, AllocatorType* allocator);
+template<typename SyntaxNodeType> internal SyntaxNodeType* create_syntax_node_internal(SyntaxNodeKind kind, SourceSite* site);
+
+template<typename SyntaxNodeType>
+internal SyntaxNodeType* create_syntax_node_internal(SyntaxNodeKind kind, SourceSite* site) {
+	auto syntax_node = allocate<SyntaxNodeType>(&heap_stack);
+	syntax_node->kind = kind;
+	syntax_node->site = site;
+	return syntax_node;
+}
+#define create_syntax_node(type, site) create_syntax_node_internal<SyntaxNode##type>(SyntaxNodeKind::##type, site);
+
+template<typename AllocatorType>
+internal void write(String* buffer, SyntaxNode* syntax_node, AllocatorType* allocator) {
+	switch (syntax_node->kind) {
+		case SyntaxNodeKind::BinaryOperation: {
+			auto binary_operation = (SyntaxNodeBinaryOperation*)syntax_node;
+			write(buffer, "(", allocator);
+			write(buffer, binary_operation->operands[0], allocator);
+			write(buffer, " ", allocator);
+			write(buffer, binary_operation->operator_keyword, allocator);
+			write(buffer, " ", allocator);
+			write(buffer, binary_operation->operands[1], allocator);
+			write(buffer, ")", allocator);
+		} break;
+		
+		case SyntaxNodeKind::Identifier: {
+			auto identifier = (SyntaxNodeIdentifier*)syntax_node;
+			write(buffer, identifier->identifier, allocator);
+		} break;
+		
+		case SyntaxNodeKind::IntegerLiteral: {
+			auto integer = (SyntaxNodeIntegerLiteral*)syntax_node;
+			write_uint(buffer, integer->integer, allocator);
+		} break;
+		
+		case SyntaxNodeKind::StringLiteral: {
+			//@todo escape string literals so we don't have line endings
+			auto string = (SyntaxNodeStringLiteral*)syntax_node;
+			write(buffer, "'", allocator);
+			write(buffer, string->string, allocator);
+			write(buffer, "'", allocator);
+		} break;
+		
+		default: {
+			fox_unreachable;
+		} break;
+	}
+}
+
+internal Optional<Array<SyntaxNode*>> parse(Array<Token> tokens) {
+	fox_assert(tokens);
+	
+	Array<SyntaxNode*> syntax_tree;
+	zero(&syntax_tree);
+	
+	ParseContext parser;
+	zero(&parser);
+	parser.cursor = tokens.data;
+	parser.tokens_end = tokens.data + tokens.length;
+	
+	while (parser.cursor < parser.tokens_end) {
+		auto expression = parse_expression(&parser);
+		if (expression) {
+			push(&syntax_tree, expression, &heap_stack);
+		} else {
+			return nil;
+		}
+	}
+	
+	return syntax_tree;
+}
+
+internal SyntaxNode* parse_expression(ParseContext* parser) {
+	fox_assert(parser->cursor < parser->tokens_end);
+	
+	SyntaxNode* left = nullptr;
+	switch (parser->cursor->kind) {
+		case TokenKind::identifier: {
+			auto identifier = create_syntax_node(Identifier, &parser->cursor->site);
+			identifier->identifier = parser->cursor->identifier_value;
+			left = identifier;
+		};
+		
+		case TokenKind::integer: {
+			auto integer = create_syntax_node(IntegerLiteral, &parser->cursor->site);
+			integer->integer = parser->cursor->integer_value;
+			left = integer;
+		};
+		
+		case TokenKind::string: {
+			auto string = create_syntax_node(StringLiteral, &parser->cursor->site);
+			string->string = parser->cursor->string_value;
+			left = string;
+		};
+		
+		case TokenKind::keyword: {
+			print("Syntax error cant be keyword here");
+			return nullptr;
+		} break;
+		
+		default: {
+			fox_unreachable;
+		};
+	}
+	
+	parser->cursor++;
+	if (parser->cursor < parser->tokens_end) {
+		if (parser->cursor->kind == TokenKind::keyword) {
+			//Currently we only have binary operators
+			auto binary_operation_site = &parser->cursor->site;
+			auto binary_operator = create_syntax_node(BinaryOperation, binary_operation_site);
+			binary_operator->operator_keyword = parser->cursor->keyword_value;
+			binary_operator->operands[0] = left;
+			
+			parser->cursor++;
+			if (parser->cursor < parser->tokens_end) {
+				auto right = parse_expression(parser);
+				if (right) {
+					binary_operator->operands[1] = right;
+					return binary_operator;
+				} else {
+					return nullptr;
+				}
+			} else {
+				print_unexpected_end_of_file(*binary_operation_site, "after binary operator.\n");
+				return nullptr;
+			}
+		}
+	}
+	
+	return left;
+}
+
+internal void interpret(String file_string, ConstString file_path) {
+	auto maybe_tokens = lex(file_string, file_path);
+	fox_assert(maybe_tokens);
+	auto tokens = maybe_tokens.value;
+	
+#if enable_lexer_print
+	String tokenized_file;
+	zero(&tokenized_file);
+	fox_for (itoken, tokens.length) {
+		write(&tokenized_file, tokens[itoken], &heap_stack);
+		write(&tokenized_file, "\n", &heap_stack);
+		write(&tokenized_file, tokens[itoken].site, &heap_stack);
+		write(&tokenized_file, "\n", &heap_stack);
+	}
+	print(tokenized_file);
+#endif
+	
+	auto maybe_syntax_tree = parse(tokens);
+	fox_assert(maybe_syntax_tree);
+	auto syntax_tree = maybe_syntax_tree.value;
+	
+#if enable_parser_print
+	String syntax_tree_string;
+	zero(&syntax_tree_string);
+	fox_for (syntax_tree_index, syntax_tree.length) {
+		write(&syntax_tree_string, syntax_tree[syntax_tree_index], &heap_stack);
+		write(&syntax_tree_string, "\n", &heap_stack);
+	}
+	print(syntax_tree_string);
+#endif
+}
+
 int main(int argument_count, char** arguments) {
 	test_foxlib();
 	
@@ -1188,18 +1405,7 @@ int main(int argument_count, char** arguments) {
 		switch (file_read_status) {
 			case FileStatus::read: {
 				auto file_string = fox_interpret_cast(String, file_data);
-				auto tokens = lex(file_string, file_path);
-				fox_assert(tokens);
-				
-				String tokenized_file;
-				zero(&tokenized_file);
-				fox_for (itoken, tokens.value.length) {
-					write(&tokenized_file, tokens.value[itoken], &heap_stack);
-					write(&tokenized_file, "\n", &heap_stack);
-					write(&tokenized_file, tokens.value[itoken].source_site, &heap_stack);
-					write(&tokenized_file, "\n", &heap_stack);
-				}
-				print(tokenized_file);
+				interpret(file_string, file_path);
 			} break;
 			
 			case FileStatus::empty: {
