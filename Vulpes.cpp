@@ -1307,19 +1307,19 @@ internal SyntaxNode* parse_expression(ParseContext* parser) {
 			auto identifier = create_syntax_node(Identifier, &parser->cursor->site);
 			identifier->identifier = parser->cursor->identifier_value;
 			left = identifier;
-		};
+		} break;
 		
 		case TokenKind::integer: {
 			auto integer = create_syntax_node(IntegerLiteral, &parser->cursor->site);
 			integer->integer = parser->cursor->integer_value;
 			left = integer;
-		};
+		} break;
 		
 		case TokenKind::string: {
 			auto string = create_syntax_node(StringLiteral, &parser->cursor->site);
 			string->string = parser->cursor->string_value;
 			left = string;
-		};
+		} break;
 		
 		case TokenKind::keyword: {
 			print("Syntax error cant be keyword here");
@@ -1328,7 +1328,7 @@ internal SyntaxNode* parse_expression(ParseContext* parser) {
 		
 		default: {
 			fox_unreachable;
-		};
+		} break;
 	}
 	
 	parser->cursor++;
