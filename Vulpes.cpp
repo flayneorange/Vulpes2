@@ -57,7 +57,7 @@ bool is_space_character(char* character) {
 }
 
 bool is_operator_character(char* character) {
-	return find(ConstString("=+"), *character);
+	return find(ConstString("=*/+-"), *character);
 }
 
 bool is_number_character(char* character) {
@@ -73,16 +73,31 @@ bool is_identifier_character(char* character) {
 //Aligns with keyword_strings;
 enum class Keyword {
 	assign,
+	multiply,
+	divide,
 	add,
+	subtract,
+	keyword_count
 };
+
 ConstString keyword_strings[] = {
 	"=",
+	"*",
+	"/",
 	"+",
+	"-",
 };
+
 u64 precedences[] = {
-	100,
-	200,
+	100, // =
+	300, // *
+	300, // /
+	200, // +
+	200, // -
 };
+
+static_assert((fuint)Keyword::keyword_count == fox_array_length(keyword_strings)
+			  && (fuint)Keyword::keyword_count == fox_array_length(precedences));
 
 enum class Associativity {
 	left,
@@ -516,7 +531,7 @@ internal SyntaxNode* parse_expression(ParseContext* parser, u64 outer_precedence
 	}
 	
 	parser->cursor++;
-	if (parser->cursor < parser->tokens_end && parser->cursor->kind == TokenKind::keyword) {
+	while (parser->cursor < parser->tokens_end && parser->cursor->kind == TokenKind::keyword) {
 		auto operator_keyword = parser->cursor->keyword_value;
 		auto precedence = precedences[(fuint)operator_keyword];
 		if (precedence > outer_precedence || (precedence == outer_precedence && get_associativity(operator_keyword) == Associativity::right)) {
@@ -531,7 +546,7 @@ internal SyntaxNode* parse_expression(ParseContext* parser, u64 outer_precedence
 				auto right = parse_expression(parser, precedence);
 				if (right) {
 					binary_operator->operands[1] = right;
-					return binary_operator;
+					left = binary_operator;
 				} else {
 					return nullptr;
 				}
@@ -539,6 +554,8 @@ internal SyntaxNode* parse_expression(ParseContext* parser, u64 outer_precedence
 				print_unexpected_end_of_file(*binary_operation_site, "after binary operator.\n");
 				return nullptr;
 			}
+		} else {
+			break;
 		}
 	}
 	

@@ -1,2 +1,2 @@
-number_of_foxes = 2 + 2
+number_of_foxes = 2 - 3 + 2 * 2 / 2
 name_of_fox = 'Joey\n hello\''

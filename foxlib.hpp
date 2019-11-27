@@ -29,6 +29,7 @@ typedef u64 fuint;
 
 #define fox_unreachable (*(fuint*)0) = 0
 #define fox_assert(condition) if (!(condition)) { fox_unreachable; }
+#define fox_array_length(array) (sizeof(array) / sizeof((array)[0]))
 
 #define fox_interpret_cast(type, expression) (*(type*)&(expression))
 
