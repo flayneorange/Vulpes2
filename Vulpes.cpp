@@ -51,6 +51,19 @@ void write(String* buffer, SourceSite site, AllocatorType* allocator) {
 	write(buffer, "\n", allocator);
 }
 
+//Print unexpected end of file at <where> error message
+//Where should end in a line ending
+void print_unexpected_end_of_file(SourceSite site, ConstString where) {
+	fox_assert(where[where.length - 1] == '\n');
+	
+	String error_message;
+	zero(&error_message);
+	write(&error_message, site, &heap_stack);
+	write(&error_message, "Syntax error: unexpected end of file ", &heap_stack);
+	write(&error_message, where, &heap_stack);
+	print(error_message);
+}
+
 //---Lexer
 bool is_space_character(char* character) {
 	return *character <= ' ';
@@ -184,19 +197,6 @@ void write(String* buffer, Token token, AllocatorType* allocator) {
 			fox_unreachable;
 		} break;
 	}
-}
-
-//Print unexpected end of file at <where> error message
-//Where should end in a line ending
-void print_unexpected_end_of_file(SourceSite site, ConstString where) {
-	fox_assert(where[where.length - 1] == '\n');
-	
-	String error_message;
-	zero(&error_message);
-	write(&error_message, site, &heap_stack);
-	write(&error_message, "Syntax error: unexpected end of file ", &heap_stack);
-	write(&error_message, where, &heap_stack);
-	print(error_message);
 }
 
 Optional<Array<Token>> lex(String source, ConstString path) {
@@ -512,8 +512,8 @@ internal bool expect_token_kind_internal(ParseContext* parser, TokenKind kind, C
 }
 #define expect_token_kind(parser, kind) if (!expect_token_kind_internal((parser), (kind))) { return nullptr; }
 
-internal bool expect_keyword_internal(ParseContext* parser, Keyword keyword) {
-	if (expect_token_kind_internal(parser, TokenKind::Keyword)) {
+internal bool expect_keyword_internal(ParseContext* parser, Keyword keyword, ConstString where) {
+	if (expect_token_kind_internal(parser, TokenKind::keyword, where)) {
 		if (parser->cursor->keyword_value == keyword) {
 			parser->cursor++;
 			return true;
@@ -550,7 +550,7 @@ internal Optional<Array<SyntaxNode*>> parse(Array<Token> tokens) {
 				
 				parser.cursor++;
 				
-				expect_token_kind(&parser, TokenKind::identifier);
+				expect_token_kind(&parser, TokenKind::identifier, "function name.\n");
 				auto function_name = parser.cursor->identifier_value;
 				parser.cursor++;
 				
