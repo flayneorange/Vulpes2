@@ -57,7 +57,7 @@ bool is_space_character(char* character) {
 }
 
 bool is_operator_character(char* character) {
-	return find(ConstString("=*/+-"), *character);
+	return find(ConstString("=*/+-,"), *character);
 }
 
 bool is_number_character(char* character) {
@@ -77,6 +77,12 @@ enum class Keyword {
 	divide,
 	add,
 	subtract,
+	declare,
+	function,
+	integer,
+	comma,
+	left_parenthesis,
+	right_parenthesis,
 	keyword_count
 };
 
@@ -86,6 +92,12 @@ ConstString keyword_strings[] = {
 	"/",
 	"+",
 	"-",
+	":",
+	"function",
+	"int",
+	",",
+	"(",
+	")",
 };
 
 u64 precedences[] = {
@@ -94,6 +106,12 @@ u64 precedences[] = {
 	300, // /
 	200, // +
 	200, // -
+	150, // :
+	0,   // function
+	0,   // int
+	0,   // ,
+	0,   // (
+	0,   // )
 };
 
 static_assert((fuint)Keyword::keyword_count == fox_array_length(keyword_strings)
@@ -474,6 +492,45 @@ internal void write(String* buffer, SyntaxNode* syntax_node, AllocatorType* allo
 	}
 }
 
+internal bool expect_token_kind_internal(ParseContext* parser, TokenKind kind, ConstString where) {
+	if (parser->cursor < parser->tokens_end) {
+		if (parser->cursor->kind == kind) {
+			return true;
+		}
+		
+		String error_message;
+		zero(&error_message);
+		write(&error_message, "Syntax error: expected token of kind ", &heap_stack);
+		write(&error_message, kind, &heap_stack);
+		write(&error_message, "\n", &heap_stack);
+		print(error_message);
+	} else {
+		print_unexpected_end_of_file(parser->cursor->site, where);
+	}
+	
+	return false;
+}
+#define expect_token_kind(parser, kind) if (!expect_token_kind_internal((parser), (kind))) { return nullptr; }
+
+internal bool expect_keyword_internal(ParseContext* parser, Keyword keyword) {
+	if (expect_token_kind_internal(parser, TokenKind::Keyword)) {
+		if (parser->cursor->keyword_value == keyword) {
+			parser->cursor++;
+			return true;
+		}
+		
+		String error_message;
+		zero(&error_message);
+		write(&error_message, "Syntax error: expected keyword ", &heap_stack);
+		write(&error_message, keyword, &heap_stack);
+		write(&error_message, "\n", &heap_stack);
+		print(error_message);
+	}
+	
+	return false;
+}
+#define expect_keyword(parser, keyword) if (!expect_keyword_internal((parser), (kind))) { return nullptr; }
+
 internal Optional<Array<SyntaxNode*>> parse(Array<Token> tokens) {
 	fox_assert(tokens);
 	
@@ -486,11 +543,65 @@ internal Optional<Array<SyntaxNode*>> parse(Array<Token> tokens) {
 	parser.tokens_end = tokens.data + tokens.length;
 	
 	while (parser.cursor < parser.tokens_end) {
-		auto expression = parse_expression(&parser);
-		if (expression) {
-			push(&syntax_tree, expression, &heap_stack);
+		if (parser.cursor->kind == TokenKind::keyword) {
+			if (parser.cursor->keyword_value == Keyword::function) {
+				//function name(argument1: int, argument2: int,): int {}
+				//function name() {}
+				
+				parser.cursor++;
+				
+				expect_token_kind(&parser, TokenKind::identifier);
+				auto function_name = parser.cursor->identifier_value;
+				parser.cursor++;
+				
+				expect_keyword(&parser, Keyword::left_parenthesis);
+				
+				//Parse arguments
+				Array<ConstString> argument_names;
+				zero(&argument_names);
+				while (true) {
+					if (parser.cursor->kind == TokenKind::Keyword) {
+						expect_keyword(&parser, Keyword::right_parenthesis);
+						break;
+					}
+					
+					expect_token_kind(TokenKind::identifier);
+					auto argument_name = parser.cursor->identifier_value;
+					parser.cursor++;
+					expect_keyword(&parser, Keyword::declare);
+					expect_keyword(&parser, Keyword::integer);
+					
+					expect_token_kind(&parser, TokenKind::keyword);
+					auto token_is_keyword = parser.cursor->kind == TokenKind::keyword;
+					auto token_is_comma_or_close_parenthesis = parser.cursor->keyword_value == Keyword::comma || parser.cursor->keyword_value == Keyword::right_parenthesis;
+					if (!(token_is_keyword && token_is_comma_or_close_parenthesis)) {
+						String error_message;
+						zero(&error_message);
+						write(&error_message, "Syntax error: expected comma or close parenthesis but got ", &heap_stack);
+						write(&error_message, *parser.cursor, &heap_stack);
+						write(&error_message, "\n", &heap_stack);
+						print(error_message);
+						return nil;
+					}
+					parser.cursor++;
+					
+				}
+			} else {
+				String error_message;
+				zero(&error_message);
+				write(&error_message, "Syntax error: unexpected keyword at top level ", &heap_stack);
+				write(&error_message, parser.cursor->keyword_value, &heap_stack);
+				write(&error_message, "\n", &heap_stack);
+				print(error_message);
+				return nil;
+			}
 		} else {
-			return nil;
+			auto expression = parse_expression(&parser);
+			if (expression) {
+				push(&syntax_tree, expression, &heap_stack);
+			} else {
+				return nil;
+			}
 		}
 	}
 	
