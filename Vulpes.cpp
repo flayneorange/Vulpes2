@@ -1,5 +1,5 @@
 //---Program Options
-#define enable_lexer_print 0
+#define enable_lexer_print 1
 #define enable_parser_print 1
 
 //---Includes
@@ -39,16 +39,34 @@ void write(String* buffer, SourceSite site, AllocatorType* allocator) {
 	zero(&line);
 	line.data = site.line_start;
 	line.length = line_end - site.line_start;
-	write(buffer, line, allocator);
+	fox_for (source_index, line.length) {
+		if (line[source_index] == '\t') {
+			write(buffer, "  ", allocator);
+		} else {
+			write_char(buffer, line[source_index], allocator);
+		}
+	}
 	write(buffer, "\n", allocator);
 	
 	//print a cursor to the start of the site
 	//-------------------------------^
 	fox_for (source_index, site.column - 1) {
-		write(buffer, "-", allocator);
+		if (line[source_index] == '\t') {
+			write(buffer, "--", allocator);
+		} else {
+			write(buffer, "-", allocator);
+		}
 	}
 	write(buffer, "^", allocator);
 	write(buffer, "\n", allocator);
+}
+
+//---Diagnostics
+template<typename AllocatorType>
+void write_indent(String* buffer, fuint indent, AllocatorType* allocator) {
+	fox_for (_, indent) {
+		write(buffer, "  ", allocator);
+	}
 }
 
 //Print unexpected end of file at <where> error message
@@ -238,6 +256,11 @@ Optional<Array<Token>> lex(String source, ConstString path) {
 		site_cursor.column++;
 	};
 	
+	auto add_to_cursor = [&](fuint amount) {
+		cursor += amount;
+		site_cursor.column += amount;
+	};
+	
 	while (cursor < source_end) {
 		//Skip whitespace
 		while (is_space_character(cursor)) {
@@ -267,19 +290,32 @@ Optional<Array<Token>> lex(String source, ConstString path) {
 			auto operator_start_site = site_cursor;
 			auto operator_start = cursor;
 			
-			while (cursor < source_end && is_operator_character(cursor)) {
-				increment_cursor();
+			auto operator_end_cursor = cursor;
+			while (operator_end_cursor < source_end && is_operator_character(operator_end_cursor)) {
+				operator_end_cursor++;
 			}
+			
 			ConstString operator_string;
 			zero(&operator_string);
 			operator_string.data = operator_start;
-			operator_string.length = cursor - operator_start;
+			operator_string.length = operator_end_cursor - operator_start;
 			
-			auto keyword_index_optional = find(Array<ConstString>(keyword_strings), operator_string);
-			if (keyword_index_optional) {
-				auto new_token = push_new_token(TokenKind::keyword, operator_start_site);
-				new_token->keyword_value = (Keyword)keyword_index_optional.value;
-			} else {
+			auto keyword_found = false;
+			while (operator_string) {
+				auto keyword_index_optional = find(Array<ConstString>(keyword_strings), operator_string);
+				if (keyword_index_optional) {
+					auto new_token = push_new_token(TokenKind::keyword, operator_start_site);
+					new_token->keyword_value = (Keyword)keyword_index_optional.value;
+					add_to_cursor(operator_end_cursor - cursor);
+					keyword_found = true;
+					break;
+				}
+				
+				operator_string.length--;
+				operator_end_cursor--;
+			}
+			
+			if (!keyword_found) {
 				String error_message;
 				zero(&error_message);
 				write(&error_message, operator_start_site, &heap_stack);
@@ -403,8 +439,14 @@ Optional<Array<Token>> lex(String source, ConstString path) {
 			identifier.data = identifier_start;
 			identifier.length = cursor - identifier_start;
 			
-			auto new_token = push_new_token(TokenKind::identifier, identifier_start_site);
-			new_token->identifier_value = identifier;
+			auto keyword_index_optional = find(Array<ConstString>(keyword_strings), identifier);
+			if (keyword_index_optional) {
+				auto new_token = push_new_token(TokenKind::keyword, identifier_start_site);
+				new_token->keyword_value = (Keyword)keyword_index_optional.value;
+			} else {
+				auto new_token = push_new_token(TokenKind::identifier, identifier_start_site);
+				new_token->identifier_value = identifier;
+			}
 		}
 	}
 	
@@ -443,6 +485,7 @@ struct SyntaxNodeStringLiteral : SyntaxNode {
 };
 
 struct SyntaxNodeFunction : SyntaxNode {
+	ConstString name;
 	Array<ConstString> argument_names;
 	Array<SyntaxNode*> body;
 };
@@ -457,7 +500,8 @@ internal Optional<Array<SyntaxNode*>> parse_statements(ParseContext* parser);
 internal SyntaxNodeFunction* parse_function(ParseContext* parser);
 internal SyntaxNode* parse_expression(ParseContext* parser, u64 outer_precedence = 0);
 
-template<typename AllocatorType> internal void write(String* buffer, SyntaxNode* syntax_node, AllocatorType* allocator);
+template<typename AllocatorType> internal void write(String* buffer, Array<SyntaxNode*> syntax_nodes, fuint indent, AllocatorType* allocator);
+template<typename AllocatorType> internal void write(String* buffer, SyntaxNode* syntax_node, fuint indent, AllocatorType* allocator);
 template<typename SyntaxNodeType> internal SyntaxNodeType* create_syntax_node_internal(SyntaxNodeKind kind, SourceSite* site);
 
 template<typename SyntaxNodeType>
@@ -469,17 +513,27 @@ internal SyntaxNodeType* create_syntax_node_internal(SyntaxNodeKind kind, Source
 }
 #define create_syntax_node(type, site) create_syntax_node_internal<SyntaxNode##type>(SyntaxNodeKind::##type, site);
 
+
 template<typename AllocatorType>
-internal void write(String* buffer, SyntaxNode* syntax_node, AllocatorType* allocator) {
+internal void write(String* buffer, Array<SyntaxNode*> syntax_nodes, fuint indent, AllocatorType* allocator) {
+	fox_for (node_index, syntax_nodes.length) {
+		write_indent(buffer, indent, allocator);
+		write(buffer, syntax_nodes[node_index], indent, allocator);
+		write(buffer, "\n", allocator);
+	}
+}
+
+template<typename AllocatorType>
+internal void write(String* buffer, SyntaxNode* syntax_node, fuint indent, AllocatorType* allocator) {
 	switch (syntax_node->kind) {
 		case SyntaxNodeKind::BinaryOperation: {
 			auto binary_operation = (SyntaxNodeBinaryOperation*)syntax_node;
 			write(buffer, "(", allocator);
-			write(buffer, binary_operation->operands[0], allocator);
+			write(buffer, binary_operation->operands[0], indent, allocator);
 			write(buffer, " ", allocator);
 			write(buffer, binary_operation->operator_keyword, allocator);
 			write(buffer, " ", allocator);
-			write(buffer, binary_operation->operands[1], allocator);
+			write(buffer, binary_operation->operands[1], indent, allocator);
 			write(buffer, ")", allocator);
 		} break;
 		
@@ -499,6 +553,23 @@ internal void write(String* buffer, SyntaxNode* syntax_node, AllocatorType* allo
 			write(buffer, "'", allocator);
 			write(buffer, string->string, allocator);
 			write(buffer, "'", allocator);
+		} break;
+		
+		case SyntaxNodeKind::Function: {
+			auto function = (SyntaxNodeFunction*)syntax_node;
+			write(buffer, "function ", allocator);
+			write(buffer, function->name, allocator);
+			write(buffer, "(", allocator);
+			fox_for (argument_index, function->argument_names.length) {
+				write(buffer, function->argument_names[argument_index], allocator);
+				write(buffer, ": int", allocator);
+				if (argument_index != function->argument_names.length - 1) {
+					write(buffer, ", ", allocator);
+				}
+			}
+			write(buffer, "): int {\n", allocator);
+			write(buffer, function->body, indent + 1, allocator);
+			write(buffer, "}\n", allocator);
 		} break;
 		
 		default: {
@@ -564,6 +635,7 @@ internal bool expect_keyword_internal(ParseContext* parser, Keyword keyword, Con
 		
 		String error_message;
 		zero(&error_message);
+		write(&error_message, parser->cursor->site, &heap_stack);
 		write(&error_message, "Syntax error: expected keyword ", &heap_stack);
 		write(&error_message, keyword, &heap_stack);
 		write(&error_message, "\n", &heap_stack);
@@ -648,7 +720,7 @@ internal SyntaxNodeFunction* parse_function(ParseContext* parser) {
 	Array<ConstString> argument_names;
 	zero(&argument_names);
 	while (true) {
-		if (parser->cursor < parser->tokens_end) {
+		if (parser->cursor >= parser->tokens_end) {
 			print_unexpected_end_of_file(parser->cursor[-1].site, "in function declaration, expected close parenthesis or next argument.\n");
 			return nullptr;
 		}
@@ -674,7 +746,10 @@ internal SyntaxNodeFunction* parse_function(ParseContext* parser) {
 			print(error_message);
 			return nullptr;
 		}
-		parser->cursor++;
+		
+		if (parser->cursor->keyword_value == Keyword::comma) {
+			parser->cursor++;
+		}
 	}
 	
 	expect_keyword(parser, Keyword::declare, "in function declaration, expected return value.\n");
@@ -686,6 +761,7 @@ internal SyntaxNodeFunction* parse_function(ParseContext* parser) {
 		expect_keyword(parser, Keyword::close_curly, "in function declaration, expected end of function body.\n");
 		
 		auto function = create_syntax_node(Function, function_site);
+		function->name = function_name;
 		function->argument_names = argument_names;
 		function->body = function_body.value;
 		return function;
@@ -783,10 +859,7 @@ internal void interpret(String file_string, ConstString file_path) {
 #if enable_parser_print
 	String syntax_tree_string;
 	zero(&syntax_tree_string);
-	fox_for (syntax_tree_index, syntax_tree.length) {
-		write(&syntax_tree_string, syntax_tree[syntax_tree_index], &heap_stack);
-		write(&syntax_tree_string, "\n", &heap_stack);
-	}
+	write(&syntax_tree_string, syntax_tree, 0, &heap_stack);
 	print(syntax_tree_string);
 #endif
 }

@@ -780,7 +780,7 @@ template<typename AllocatorType>
 internal FileStatus read_entire_file(const char* path, AllocatorType* allocator, Array<u8>* out_buffer) {
 	auto file_status = FileStatus::error;
 	
-	auto* file = fopen(path, "r+");
+	auto* file = fopen(path, "rb+");
 	if (file) {
 		fseek(file, 0, SEEK_END);
 		fuint size = ftell(file);
@@ -790,9 +790,7 @@ internal FileStatus read_entire_file(const char* path, AllocatorType* allocator,
 			auto bytes_read = fread(out_buffer->data, 1, size, file);
 			if (bytes_read == size) {
 				file_status = FileStatus::read;
-			} else {
-				file_status = FileStatus::error;
-			}
+			} 
 		} else {
 			file_status = FileStatus::empty;
 		}
