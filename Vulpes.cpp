@@ -94,8 +94,8 @@ enum class Keyword {
 	function,
 	integer,
 	comma,
-	left_parenthesis,
-	right_parenthesis,
+	open_parenthesis,
+	close_parenthesis,
 	keyword_count
 };
 
@@ -411,6 +411,7 @@ enum class SyntaxNodeKind : u8 {
 	Identifier,
 	IntegerLiteral,
 	StringLiteral,
+	Function,
 };
 
 struct SyntaxNode {
@@ -435,13 +436,19 @@ struct SyntaxNodeStringLiteral : SyntaxNode {
 	ConstString string;
 };
 
+struct SyntaxNodeFunction : SyntaxNode {
+	Array<ConstString> argument_names;
+};
+
 struct ParseContext {
 	Token* cursor;
 	Token* tokens_end;
 };
 
-internal SyntaxNode* parse_expression(ParseContext* parser, u64 outer_precedence = 0);
 internal Optional<Array<SyntaxNode*>> parse(Array<Token> tokens);
+internal SyntaxNodeFunction* parse_function(ParseContext* parser);
+internal SyntaxNode* parse_expression(ParseContext* parser, u64 outer_precedence = 0);
+
 template<typename AllocatorType> internal void write(String* buffer, SyntaxNode* syntax_node, AllocatorType* allocator);
 template<typename SyntaxNodeType> internal SyntaxNodeType* create_syntax_node_internal(SyntaxNodeKind kind, SourceSite* site);
 
@@ -500,17 +507,45 @@ internal bool expect_token_kind_internal(ParseContext* parser, TokenKind kind, C
 		
 		String error_message;
 		zero(&error_message);
-		write(&error_message, "Syntax error: expected token of kind ", &heap_stack);
-		write(&error_message, kind, &heap_stack);
+		write(&error_message, "Syntax error: expected ", &heap_stack);
+		
+		ConstString kind_string;
+		zero(&kind_string);
+		switch (kind) {
+			case TokenKind::keyword: {
+				kind_string = "keyword";
+			} break;
+			
+			case TokenKind::integer: {
+				kind_string = "integer literal";
+			} break;
+			
+			case TokenKind::string: {
+				kind_string = "string literal";
+			} break;
+			
+			case TokenKind::identifier: {
+				kind_string = "identifier";
+			} break;
+			
+			default: {
+				fox_unreachable;
+			} break;
+		}
+		
+		write(&error_message, kind_string, &heap_stack);
+		write(&error_message, " but got ", &heap_stack);
+		write(&error_message, *parser->cursor, &heap_stack);
 		write(&error_message, "\n", &heap_stack);
 		print(error_message);
 	} else {
-		print_unexpected_end_of_file(parser->cursor->site, where);
+		//@todo we should probably provide a different site for this
+		print_unexpected_end_of_file(parser->cursor[-1].site, where);
 	}
 	
 	return false;
 }
-#define expect_token_kind(parser, kind) if (!expect_token_kind_internal((parser), (kind))) { return nullptr; }
+#define expect_token_kind(parser, kind, where) if (!expect_token_kind_internal((parser), (kind), (where))) { return nullptr; }
 
 internal bool expect_keyword_internal(ParseContext* parser, Keyword keyword, ConstString where) {
 	if (expect_token_kind_internal(parser, TokenKind::keyword, where)) {
@@ -529,7 +564,7 @@ internal bool expect_keyword_internal(ParseContext* parser, Keyword keyword, Con
 	
 	return false;
 }
-#define expect_keyword(parser, keyword) if (!expect_keyword_internal((parser), (kind))) { return nullptr; }
+#define expect_keyword(parser, keyword, where) if (!expect_keyword_internal((parser), (keyword), (where))) { return nullptr; }
 
 internal Optional<Array<SyntaxNode*>> parse(Array<Token> tokens) {
 	fox_assert(tokens);
@@ -545,46 +580,11 @@ internal Optional<Array<SyntaxNode*>> parse(Array<Token> tokens) {
 	while (parser.cursor < parser.tokens_end) {
 		if (parser.cursor->kind == TokenKind::keyword) {
 			if (parser.cursor->keyword_value == Keyword::function) {
-				//function name(argument1: int, argument2: int,): int {}
-				//function name() {}
-				
-				parser.cursor++;
-				
-				expect_token_kind(&parser, TokenKind::identifier, "function name.\n");
-				auto function_name = parser.cursor->identifier_value;
-				parser.cursor++;
-				
-				expect_keyword(&parser, Keyword::left_parenthesis);
-				
-				//Parse arguments
-				Array<ConstString> argument_names;
-				zero(&argument_names);
-				while (true) {
-					if (parser.cursor->kind == TokenKind::Keyword) {
-						expect_keyword(&parser, Keyword::right_parenthesis);
-						break;
-					}
-					
-					expect_token_kind(TokenKind::identifier);
-					auto argument_name = parser.cursor->identifier_value;
-					parser.cursor++;
-					expect_keyword(&parser, Keyword::declare);
-					expect_keyword(&parser, Keyword::integer);
-					
-					expect_token_kind(&parser, TokenKind::keyword);
-					auto token_is_keyword = parser.cursor->kind == TokenKind::keyword;
-					auto token_is_comma_or_close_parenthesis = parser.cursor->keyword_value == Keyword::comma || parser.cursor->keyword_value == Keyword::right_parenthesis;
-					if (!(token_is_keyword && token_is_comma_or_close_parenthesis)) {
-						String error_message;
-						zero(&error_message);
-						write(&error_message, "Syntax error: expected comma or close parenthesis but got ", &heap_stack);
-						write(&error_message, *parser.cursor, &heap_stack);
-						write(&error_message, "\n", &heap_stack);
-						print(error_message);
-						return nil;
-					}
-					parser.cursor++;
-					
+				auto function = parse_function(&parser);
+				if (function) {
+					push(&syntax_tree, function, &heap_stack);
+				} else {
+					return nil;
 				}
 			} else {
 				String error_message;
@@ -606,6 +606,60 @@ internal Optional<Array<SyntaxNode*>> parse(Array<Token> tokens) {
 	}
 	
 	return syntax_tree;
+}
+
+internal SyntaxNodeFunction* parse_function(ParseContext* parser) {
+	//function name(argument1: int, argument2: int,): int {}
+	//function name() {}
+	fox_assert(parser->cursor->kind == TokenKind::keyword && parser->cursor->keyword_value == Keyword::function);
+	auto function_site = &parser->cursor->site;
+	parser->cursor++;
+	
+	expect_token_kind(parser, TokenKind::identifier, "in function declaration, expected function name.\n");
+	auto function_name = parser->cursor->identifier_value;
+	parser->cursor++;
+	
+	expect_keyword(parser, Keyword::open_parenthesis, "in function declaration, expected open parenthesis.\n");
+	
+	//Parse arguments
+	Array<ConstString> argument_names;
+	zero(&argument_names);
+	while (true) {
+		if (parser->cursor < parser->tokens_end) {
+			print_unexpected_end_of_file(parser->cursor[-1].site, "in function declaration, expected close parenthesis or next argument.\n");
+			return nullptr;
+		}
+		
+		if (parser->cursor->kind == TokenKind::keyword) {
+			expect_keyword(parser, Keyword::close_parenthesis, "in function declaration, expected close parenthesis or next argument.\n");
+			break;
+		}
+		
+		expect_token_kind(parser, TokenKind::identifier, "in function declaration, expected name of argument.\n");
+		auto argument_name = parser->cursor->identifier_value;
+		parser->cursor++;
+		expect_keyword(parser, Keyword::declare, "in function declaration, expected type of argumnet.\n");
+		expect_keyword(parser, Keyword::integer, "in function declaration, expected type of argumnet.\n");
+		
+		expect_token_kind(parser, TokenKind::keyword, "in function declaration, expected close parenthesis or next argument.\n");
+		if (!(parser->cursor->keyword_value == Keyword::comma || parser->cursor->keyword_value == Keyword::close_parenthesis)) {
+			String error_message;
+			zero(&error_message);
+			write(&error_message, "Syntax error: expected comma or close parenthesis but got ", &heap_stack);
+			write(&error_message, *parser->cursor, &heap_stack);
+			write(&error_message, "\n", &heap_stack);
+			print(error_message);
+			return nullptr;
+		}
+		parser->cursor++;
+	}
+	
+	expect_keyword(parser, Keyword::declare, "in function declaration, expected return value.\n");
+	expect_keyword(parser, Keyword::integer, "in function declaration, expected a dumb stupid single integer return value????\n");
+	
+	//@todo function body
+	auto function = create_syntax_node(Function, function_site);
+	return function;
 }
 
 internal SyntaxNode* parse_expression(ParseContext* parser, u64 outer_precedence) {
