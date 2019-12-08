@@ -70,7 +70,7 @@ bool is_space_character(char* character) {
 }
 
 bool is_operator_character(char* character) {
-	return find(ConstString("=*/+-,"), *character);
+	return find(ConstString("`~!@#$%^&*()-+=[]\\{}|;:,./"), *character);
 }
 
 bool is_number_character(char* character) {
@@ -96,6 +96,8 @@ enum class Keyword {
 	comma,
 	open_parenthesis,
 	close_parenthesis,
+	open_curly,
+	close_curly,
 	keyword_count
 };
 
@@ -111,6 +113,8 @@ ConstString keyword_strings[] = {
 	",",
 	"(",
 	")",
+	"{",
+	"}",
 };
 
 u64 precedences[] = {
@@ -125,6 +129,8 @@ u64 precedences[] = {
 	0,   // ,
 	0,   // (
 	0,   // )
+	0,   // {
+	0,   // }
 };
 
 static_assert((fuint)Keyword::keyword_count == fox_array_length(keyword_strings)
@@ -438,6 +444,7 @@ struct SyntaxNodeStringLiteral : SyntaxNode {
 
 struct SyntaxNodeFunction : SyntaxNode {
 	Array<ConstString> argument_names;
+	Array<SyntaxNode*> body;
 };
 
 struct ParseContext {
@@ -446,6 +453,7 @@ struct ParseContext {
 };
 
 internal Optional<Array<SyntaxNode*>> parse(Array<Token> tokens);
+internal Optional<Array<SyntaxNode*>> parse_statements(ParseContext* parser);
 internal SyntaxNodeFunction* parse_function(ParseContext* parser);
 internal SyntaxNode* parse_expression(ParseContext* parser, u64 outer_precedence = 0);
 
@@ -577,35 +585,50 @@ internal Optional<Array<SyntaxNode*>> parse(Array<Token> tokens) {
 	parser.cursor = tokens.data;
 	parser.tokens_end = tokens.data + tokens.length;
 	
-	while (parser.cursor < parser.tokens_end) {
-		if (parser.cursor->kind == TokenKind::keyword) {
-			if (parser.cursor->keyword_value == Keyword::function) {
-				auto function = parse_function(&parser);
-				if (function) {
-					push(&syntax_tree, function, &heap_stack);
-				} else {
+	return parse_statements(&parser);
+}
+
+internal Optional<Array<SyntaxNode*>> parse_statements(ParseContext* parser) {
+	Array<SyntaxNode*> statements;
+	zero(&statements);
+	
+	while (parser->cursor < parser->tokens_end) {
+		if (parser->cursor->kind == TokenKind::keyword) {
+			switch (parser->cursor->keyword_value) {
+				case Keyword::function: {
+					auto function = parse_function(parser);
+					if (function) {
+						push(&statements, function, &heap_stack);
+					} else {
+						return nil;
+					}
+				} break;
+				
+				case Keyword::close_curly: {
+					return statements;
+				} break;
+				
+				default: {
+					String error_message;
+					zero(&error_message);
+					write(&error_message, "Syntax error: unexpected keyword at top level ", &heap_stack);
+					write(&error_message, parser->cursor->keyword_value, &heap_stack);
+					write(&error_message, "\n", &heap_stack);
+					print(error_message);
 					return nil;
-				}
-			} else {
-				String error_message;
-				zero(&error_message);
-				write(&error_message, "Syntax error: unexpected keyword at top level ", &heap_stack);
-				write(&error_message, parser.cursor->keyword_value, &heap_stack);
-				write(&error_message, "\n", &heap_stack);
-				print(error_message);
-				return nil;
+				} break;
 			}
 		} else {
-			auto expression = parse_expression(&parser);
+			auto expression = parse_expression(parser);
 			if (expression) {
-				push(&syntax_tree, expression, &heap_stack);
+				push(&statements, expression, &heap_stack);
 			} else {
 				return nil;
 			}
 		}
 	}
 	
-	return syntax_tree;
+	return statements;
 }
 
 internal SyntaxNodeFunction* parse_function(ParseContext* parser) {
@@ -657,9 +680,18 @@ internal SyntaxNodeFunction* parse_function(ParseContext* parser) {
 	expect_keyword(parser, Keyword::declare, "in function declaration, expected return value.\n");
 	expect_keyword(parser, Keyword::integer, "in function declaration, expected a dumb stupid single integer return value????\n");
 	
-	//@todo function body
-	auto function = create_syntax_node(Function, function_site);
-	return function;
+	expect_keyword(parser, Keyword::open_curly, "in function declaration, expected function body.\n");
+	auto function_body = parse_statements(parser);
+	if (function_body) {
+		expect_keyword(parser, Keyword::close_curly, "in function declaration, expected end of function body.\n");
+		
+		auto function = create_syntax_node(Function, function_site);
+		function->argument_names = argument_names;
+		function->body = function_body.value;
+		return function;
+	}
+	
+	return nullptr;
 }
 
 internal SyntaxNode* parse_expression(ParseContext* parser, u64 outer_precedence) {
