@@ -1,6 +1,7 @@
 //---Program Options
 #define enable_lexer_print 1
 #define enable_parser_print 1
+#define enable_linearizer_print 1
 
 //---Includes
 #include "foxlib.hpp"
@@ -524,6 +525,7 @@ internal SyntaxNode* parse_expression(ParseContext* parser, u64 outer_precedence
 
 template<typename AllocatorType> internal void write(String* buffer, Array<SyntaxNode*> syntax_nodes, fuint indent, AllocatorType* allocator);
 template<typename AllocatorType> internal void write(String* buffer, SyntaxNode* syntax_node, fuint indent, AllocatorType* allocator);
+template<typename AllocatorType> internal void write_function_opening(String* buffer, SyntaxNodeFunction* function, AllocatorType* allocator);
 template<typename SyntaxNodeType> internal SyntaxNodeType* create_syntax_node_internal(SyntaxNodeKind kind, SourceSite* site);
 
 template<typename SyntaxNodeType>
@@ -579,17 +581,7 @@ internal void write(String* buffer, SyntaxNode* syntax_node, fuint indent, Alloc
 		
 		case SyntaxNodeKind::Function: {
 			auto function = (SyntaxNodeFunction*)syntax_node;
-			write(buffer, "function ", allocator);
-			write(buffer, function->name, allocator);
-			write(buffer, "(", allocator);
-			fox_for (argument_index, function->argument_names.length) {
-				write(buffer, function->argument_names[argument_index], allocator);
-				write(buffer, ": int", allocator);
-				if (argument_index != function->argument_names.length - 1) {
-					write(buffer, ", ", allocator);
-				}
-			}
-			write(buffer, "): int {\n", allocator);
+			write_function_opening(buffer, function, &heap_stack);
 			write(buffer, function->body, indent + 1, allocator);
 			write(buffer, "}\n", allocator);
 		} break;
@@ -598,6 +590,21 @@ internal void write(String* buffer, SyntaxNode* syntax_node, fuint indent, Alloc
 			fox_unreachable;
 		} break;
 	}
+}
+
+template<typename AllocatorType>
+internal void write_function_opening(String* buffer, SyntaxNodeFunction* function, AllocatorType* allocator) {
+	write(buffer, "function ", allocator);
+	write(buffer, function->name, allocator);
+	write(buffer, "(", allocator);
+	fox_for (argument_index, function->argument_names.length) {
+		write(buffer, function->argument_names[argument_index], allocator);
+		write(buffer, ": int", allocator);
+		if (argument_index != function->argument_names.length - 1) {
+			write(buffer, ", ", allocator);
+		}
+	}
+	write(buffer, "): int {\n", allocator);
 }
 
 internal bool expect_token_kind_internal(ParseContext* parser, TokenKind kind, ConstString where) {
@@ -871,8 +878,8 @@ struct LinearizerContext {
 };
 
 //---Linearizer
-internal bool linearize_function(SyntaxNodeFunction* function);
-internal bool linearize_node(SyntaxNode* node, SyntaxNodeFunction* containing_function);
+internal bool linearize_function(LinearizerContext* linearizer, SyntaxNodeFunction* function);
+internal bool linearize_node(LinearizerContext* linearizer, SyntaxNode* node, SyntaxNodeFunction* containing_function);
 internal void push_node(SyntaxNode* node, SyntaxNodeFunction* containing_function);
 internal void print_statement_does_nothing_warning(SyntaxNode* statement);
 
@@ -901,24 +908,24 @@ internal bool linearize(LinearizerContext* linearizer, Array<SyntaxNode*> statem
 	}
 	
 	fox_for (function_index, linearizer->functions.length) {
-		if (!linearize_function(linearizer->functions[function_index])) {
+		if (!linearize_function(linearizer, linearizer->functions[function_index])) {
 			return false;
 		}
 	}
 	
-	return linearize_function(&linearizer->global_function);
+	return linearize_function(linearizer, &linearizer->global_function);
 }
 
-internal bool linearize_function(SyntaxNodeFunction* function) {
+internal bool linearize_function(LinearizerContext* linearizer, SyntaxNodeFunction* function) {
 	fox_for (statement_index, function->body.length) {
-		if (!linearize_node(function->body[statement_index], function)) {
+		if (!linearize_node(linearizer, function->body[statement_index], function)) {
 			return false;
 		}
 	}
 	return true;
 }
 
-internal bool linearize_node(SyntaxNode* node, SyntaxNodeFunction* containing_function) {
+internal bool linearize_node(LinearizerContext* linearizer, SyntaxNode* node, SyntaxNodeFunction* containing_function) {
 	switch (node->kind) {
 		case SyntaxNodeKind::BinaryOperation: {
 			auto binary_operation = (SyntaxNodeBinaryOperation*)node;
@@ -961,21 +968,22 @@ internal bool linearize_node(SyntaxNode* node, SyntaxNodeFunction* containing_fu
 				new_value->identifier = declaration_identifier->identifier;
 				new_value->type = type->type;
 			} else {
-				if (!linearize_node(binary_operation->operands[0], containing_function)
-					|| !linearize_node(binary_operation->operands[1], containing_function)) {
+				if (!linearize_node(linearizer, binary_operation->operands[0], containing_function)
+					|| !linearize_node(linearizer, binary_operation->operands[1], containing_function)) {
 					return false;
 				}
 				push_node(binary_operation, containing_function);
 			}
 		} break;
 		
-		case SyntaxNodeKind::Identifier: {
-		} break;
-		case SyntaxNodeKind::IntegerLiteral: {
-		} break;
+		case SyntaxNodeKind::Identifier:
+		case SyntaxNodeKind::IntegerLiteral:
 		case SyntaxNodeKind::StringLiteral: {
+			push_node(node, containing_function);
 		} break;
+		
 		case SyntaxNodeKind::Function: {
+			push(&linearizer->functions, (SyntaxNodeFunction*)node, &heap_stack);
 		} break;
 		
 		default: {
@@ -998,6 +1006,20 @@ internal void print_statement_does_nothing_warning(SyntaxNode* statement) {
 	write(&error_message, "Warning: statement does nothing.", &heap_stack);
 	print(error_message);
 	restore(&heap_stack, restore_point);
+}
+
+template<typename AllocatorType>
+internal void write(String* buffer, LinearizerContext* linearizer, AllocatorType* allocator) {
+	write(buffer, "Functions:\n\n", allocator);
+	fox_for (function_index, linearizer->functions.length) {
+		auto function = linearizer->functions[function_index];
+		write_function_opening(buffer, function, allocator);
+		write(buffer, function->linear_nodes, 1, allocator);
+		write(buffer, "}\n\n", allocator);
+	}
+	
+	write(buffer, "Global statements:\n", allocator);
+	write(buffer, linearizer->global_function.linear_nodes, 1, allocator);
 }
 
 //---Interpreter
@@ -1034,7 +1056,12 @@ internal void interpret(String file_string, ConstString file_path) {
 	auto linearize_successful = linearize(&linearizer, syntax_tree);
 	fox_assert(linearize_successful);
 	
-	//@todo print
+#if enable_linearizer_print
+	String linearizer_string;
+	zero(&linearizer_string);
+	write(&linearizer_string, &linearizer, &heap_stack);
+	print(linearizer_string);
+#endif
 }
 
 int main(int argument_count, char** arguments) {
