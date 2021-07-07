@@ -678,9 +678,6 @@ internal bool expect_keyword_internal(ParseContext* parser, Keyword keyword, Con
 internal Optional<Array<SyntaxNode*>> parse(Array<Token> tokens) {
 	fox_assert(tokens);
 	
-	Array<SyntaxNode*> syntax_tree;
-	zero(&syntax_tree);
-	
 	ParseContext parser;
 	zero(&parser);
 	parser.cursor = tokens.data;
