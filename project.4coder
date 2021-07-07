@@ -2,47 +2,52 @@ version(1);
 
 project_name = "Vulpes";
 
-patterns = {
-	".bat",
-	".cpp",
-	".hpp",
-	".4coder",
+patterns =
+{
+	"*.cpp",
+	"*.hpp",
+	"*.bat",
+	"*.4coder",
 };
 
-blacklist_patterns = {
-	"ExtractComments.bat",
+blacklist_patterns =
+{
+	".*",
 };
 
-load_paths = {
+load_paths =
+{
 	{
-		.paths = {
-			{
-				.path = ".",
-				.recursive = false,
-				.relative = true,
-			},
-		},
-		.os = "win",
+		{ {"."}, .recursive = true, .relative = true }, .os = "win"
 	},
 };
 
-command_list = {
+command_list =
+{
 	{
 		.name = "build",
 		.out = "*compilation*",
 		.footer_panel = false,
 		.save_dirty_files = true,
 		.cursor_at_end = false,
-		.cmd = { { "build.bat", .os = "win" } },
+		.cmd =
+		{
+			{ "build.bat", .os = "win" },
+		},
 	},
+	
 	{
 		.name = "run",
 		.out = "*run*",
 		.footer_panel = false,
-		.save_dirty_files = false,
+		.save_dirty_files = true,
 		.cursor_at_end = false,
-		.cmd = { { "run.bat", .os = "win" } },
+		.cmd =
+		{
+			{ "run.bat", .os = "win" },
+		},
 	},
+	
 	{
 		.name = "clean",
 		.out = "",
