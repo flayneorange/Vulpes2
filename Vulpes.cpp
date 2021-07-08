@@ -507,6 +507,7 @@ struct SyntaxNodeType : SyntaxNode {
 
 struct SyntaxNodeFunction : SyntaxNode {
 	ConstString name;
+	//@todo argument sites
 	Array<ConstString> argument_names;
 	Array<SyntaxNode*> body;
 	Array<SyntaxNode*> linear_nodes;
@@ -914,6 +915,14 @@ internal bool linearize(LinearizerContext* linearizer, Array<SyntaxNode*> statem
 }
 
 internal bool linearize_function(LinearizerContext* linearizer, SyntaxNodeFunction* function) {
+	fox_for (argument_index, function->argument_names.length) {
+		auto argument_value = push_zero(&function->declarations, &heap_stack);
+		argument_value->identifier = function->argument_names[argument_index];
+		argument_value->type = Type::integer;
+		//@todo better site for this
+		argument_value->declaration_site = function->site;
+	}
+	
 	fox_for (statement_index, function->body.length) {
 		if (!linearize_node(linearizer, function->body[statement_index], function)) {
 			return false;
@@ -1017,6 +1026,22 @@ internal void write(String* buffer, LinearizerContext* linearizer, AllocatorType
 	
 	write(buffer, "Global statements:\n", allocator);
 	write(buffer, linearizer->global_function.linear_nodes, 1, allocator);
+}
+
+//---Validater
+internal b8 validate_function_semantics(SyntaxNodeFunction* function);
+
+internal b8 validate_semantics(LinearizerContext* linearizer) {
+	fox_for (function_index, linearizer->functions.length) {
+		if (!validate_function_semantics(linearizer->functions[function_index])) {
+			return false;
+		}
+	}
+	return validate_function_semantics(&linearizer->global_function);
+}
+
+internal b8 validate_function_semantics(SyntaxNodeFunction* function) {
+	
 }
 
 //---Interpreter
