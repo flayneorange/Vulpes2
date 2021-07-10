@@ -1,5 +1,5 @@
 //---Program Options
-#define enable_lexer_print 1
+#define enable_lexer_print 0
 #define enable_parser_print 1
 #define enable_linearizer_print 1
 
@@ -603,9 +603,24 @@ internal void write(String* buffer, SyntaxNode* syntax_node, fuint indent, Alloc
 		
 		case SyntaxNodeKind::Function: {
 			auto function = (SyntaxNodeFunction*)syntax_node;
-			write_function_opening(buffer, function, &heap_stack);
+			write_function_opening(buffer, function, allocator);
 			write(buffer, function->body, indent + 1, allocator);
+			write_indent(buffer, indent, allocator);
 			write(buffer, "}\n", allocator);
+		} break;
+		
+		case SyntaxNodeKind::Type: {
+			auto type = (SyntaxNodeType*)syntax_node;
+			switch (type->type) {
+				case Type::integer: {
+					write(buffer, "int", allocator);
+				} break;
+				
+				case Type::string: //Currently impossible to actually get this type in a syntax tree
+				default: {
+					fox_unreachable;
+				} break;
+			}
 		} break;
 		
 		default: {
@@ -846,6 +861,7 @@ internal SyntaxNode* parse_expression(ParseContext* parser, u64 outer_precedence
 			if (keyword == Keyword::integer) {
 				auto type = create_syntax_node(Type, &parser->cursor->site);
 				type->type = Type::integer;
+				left = type;
 			} else {
 				print("Syntax error cant be keyword here");
 				return nullptr;
@@ -966,26 +982,18 @@ internal bool linearize_node(LinearizerContext* linearizer, SyntaxNode* node, Sy
 					}
 				}
 				
-				auto type = (SyntaxNodeType*)binary_operation->operands[1];
-				if (type->kind != SyntaxNodeKind::Type) {
-					String error_message;
-					zero(&error_message);
-					write(&error_message, *type->site, &heap_stack);
-					write(&error_message, "Syntax Error: expected type on right side of declaration.\n", &heap_stack);
-					print(error_message);
-					return false;
-				}
-				
 				auto new_value = push_zero(&containing_function->declarations, &heap_stack);
 				new_value->identifier = declaration_identifier->identifier;
-				new_value->type = type->type;
+				
+				binary_operation->result = new_value;
 			} else {
-				if (!linearize_node(linearizer, binary_operation->operands[0], containing_function)
-					|| !linearize_node(linearizer, binary_operation->operands[1], containing_function)) {
+				if (!(linearize_node(linearizer, binary_operation->operands[0], containing_function)
+					  && linearize_node(linearizer, binary_operation->operands[1], containing_function))) {
 					return false;
 				}
-				push_node(binary_operation, containing_function);
 			}
+			
+			push_node(binary_operation, containing_function);
 		} break;
 		
 		case SyntaxNodeKind::Identifier:
@@ -1003,7 +1011,8 @@ internal bool linearize_node(LinearizerContext* linearizer, SyntaxNode* node, Sy
 			if (!linearize_function(linearizer, function_node)) {
 				return false;
 			}
-			push(&linearizer->functions, function_node, &heap_stack);
+			
+			push_node(function_node, containing_function);
 		} break;
 		
 		default: {
@@ -1049,7 +1058,20 @@ internal bool validate_node_semantics(SyntaxNode* node, SyntaxNodeFunction* cont
 			auto binary_operation = (SyntaxNodeBinaryOperation*)node;
 			node->result = allocate<Value>(&heap_stack);
 			
-			if (binary_operation->operator_keyword == Keyword::assign) {
+			if (binary_operation->operator_keyword == Keyword::declare) {
+				auto type = (SyntaxNodeType*)binary_operation->operands[1];
+				if (type->kind != SyntaxNodeKind::Type) {
+					String error_message;
+					zero(&error_message);
+					write(&error_message, *type->site, &heap_stack);
+					write(&error_message, "Syntax Error: expected type on right side of declaration.\n", &heap_stack);
+					print(error_message);
+					return false;
+				}
+				
+				//result is created during linearization which handles the actual declaration aspect
+				binary_operation->result->type = type->type;
+			} else if (binary_operation->operator_keyword == Keyword::assign) {
 				if (binary_operation->operands[0]->result->type != binary_operation->operands[1]->result->type) {
 					String error_message;
 					zero(&error_message);
@@ -1152,7 +1174,7 @@ internal bool validate_semantics(LinearizerContext* linearizer) {
 		}
 	}
 	
-	return validate_function_semantics(&linearizer->global_function);
+	return true;
 }
 
 //---Interpreter
@@ -1195,6 +1217,10 @@ internal void interpret(String file_string, ConstString file_path) {
 	write(&linearizer_string, &linearizer, &heap_stack);
 	print(linearizer_string);
 #endif
+	
+	if (validate_semantics(&linearizer)) {
+		//...
+	}
 }
 
 int main(int argument_count, char** arguments) {

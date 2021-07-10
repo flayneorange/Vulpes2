@@ -1,7 +1,7 @@
-function hello(x : int, y : int): int {
-	number_of_foxes = 2 - 3 + 2 * 2 / 2
+function hello(x: int, y: int): int {
+	number_of_foxes: int = 2 - 3 + 2 * 2 / 2
 }
 
 function hello2(): int {
-	name_of_fox = 'Joey\n hello\''
+	'Joey\n hello\''
 }
