@@ -18,7 +18,7 @@ struct SourceSite {
 };
 
 template<typename AllocatorType>
-void write(String* buffer, SourceSite site, AllocatorType* allocator) {
+internal void write(String* buffer, SourceSite site, AllocatorType* allocator) {
 	write(buffer, "File: ", allocator);
 	write(buffer, site.path, allocator);
 	write(buffer, " line ", allocator);
@@ -64,7 +64,7 @@ void write(String* buffer, SourceSite site, AllocatorType* allocator) {
 
 //---Diagnostics
 template<typename AllocatorType>
-void write_indent(String* buffer, fuint indent, AllocatorType* allocator) {
+internal void write_indent(String* buffer, fuint indent, AllocatorType* allocator) {
 	fox_for (_, indent) {
 		write(buffer, "  ", allocator);
 	}
@@ -187,12 +187,12 @@ struct Token {
 };
 
 template<typename AllocatorType>
-void write(String* buffer, Keyword keyword, AllocatorType* allocator) {
+internal void write(String* buffer, Keyword keyword, AllocatorType* allocator) {
 	write(buffer, keyword_strings[(fuint)keyword], allocator);
 }
 
 template<typename AllocatorType>
-void write(String* buffer, Token token, AllocatorType* allocator) {
+internal void write(String* buffer, Token token, AllocatorType* allocator) {
 	switch (token.kind) {
 		case TokenKind::keyword: {
 			write(buffer, "Keyword (", allocator);
@@ -459,9 +459,27 @@ struct SyntaxNode;
 struct SyntaxNodeFunction;
 
 enum class Type : u8 {
+	invalid,
 	integer,
 	string
 };
+
+template<typename AllocatorType>
+internal void write(String* buffer, Type type, AllocatorType* allocator) {
+	switch (type) {
+		case Type::integer: {
+			write(buffer, "integer", allocator);
+		} break;
+		
+		case Type::string: {
+			write(buffer, "string", allocator);
+		} break;
+		
+		default: {
+			fox_unreachable;
+		}
+	}
+}
 
 struct Value {
 	SourceSite* declaration_site;
@@ -471,6 +489,7 @@ struct Value {
 
 //---Parser
 enum class SyntaxNodeKind : u8 {
+	Invalid,
 	BinaryOperation,
 	Identifier,
 	IntegerLiteral,
@@ -482,6 +501,7 @@ enum class SyntaxNodeKind : u8 {
 struct SyntaxNode {
 	SourceSite* site;
 	SyntaxNodeKind kind;
+	Value* result;
 };
 
 struct SyntaxNodeBinaryOperation : SyntaxNode {
@@ -882,39 +902,23 @@ internal void push_node(SyntaxNode* node, SyntaxNodeFunction* containing_functio
 internal void print_statement_does_nothing_warning(SyntaxNode* statement);
 
 internal bool linearize(LinearizerContext* linearizer, Array<SyntaxNode*> statements) {
-	fox_for (statement_index, statements.length) {
-		auto statement = statements[statement_index];
-		switch (statement->kind) {
-			case SyntaxNodeKind::BinaryOperation: {
-				push(&linearizer->global_statements, statement, &heap_stack);
-			} break;
-			
-			case SyntaxNodeKind::Identifier:
+	linearizer->global_function.body = statements;
+	return linearize_function(linearizer, &linearizer->global_function);
+}
+
+/*
+@todo incorporate this into below
+
+case SyntaxNodeKind::Identifier:
 			case SyntaxNodeKind::IntegerLiteral:
 			case SyntaxNodeKind::StringLiteral: {
 				print_statement_does_nothing_warning(statement);
 			} break;
-			
-			case SyntaxNodeKind::Function: {
-				push(&linearizer->functions, (SyntaxNodeFunction*)statement, &heap_stack);
-			} break;
-			
-			default: {
-				fox_unreachable;
-			} break;
-		}
-	}
-	
-	fox_for (function_index, linearizer->functions.length) {
-		if (!linearize_function(linearizer, linearizer->functions[function_index])) {
-			return false;
-		}
-	}
-	
-	return linearize_function(linearizer, &linearizer->global_function);
-}
-
+						
+*/
 internal bool linearize_function(LinearizerContext* linearizer, SyntaxNodeFunction* function) {
+	push(&linearizer->functions, function, &heap_stack);
+	
 	fox_for (argument_index, function->argument_names.length) {
 		auto argument_value = push_zero(&function->declarations, &heap_stack);
 		argument_value->identifier = function->argument_names[argument_index];
@@ -928,6 +932,7 @@ internal bool linearize_function(LinearizerContext* linearizer, SyntaxNodeFuncti
 			return false;
 		}
 	}
+	
 	return true;
 }
 
@@ -985,11 +990,19 @@ internal bool linearize_node(LinearizerContext* linearizer, SyntaxNode* node, Sy
 		case SyntaxNodeKind::Identifier:
 		case SyntaxNodeKind::IntegerLiteral:
 		case SyntaxNodeKind::StringLiteral: {
+			if (containing_function == &linearizer->global_function) {
+				print_statement_does_nothing_warning(node);
+			}
+			
 			push_node(node, containing_function);
 		} break;
 		
 		case SyntaxNodeKind::Function: {
-			push(&linearizer->functions, (SyntaxNodeFunction*)node, &heap_stack);
+			auto function_node = (SyntaxNodeFunction*)node;
+			if (!linearize_function(linearizer, function_node)) {
+				return false;
+			}
+			push(&linearizer->functions, function_node, &heap_stack);
 		} break;
 		
 		default: {
@@ -1029,19 +1042,116 @@ internal void write(String* buffer, LinearizerContext* linearizer, AllocatorType
 }
 
 //---Validater
-internal b8 validate_function_semantics(SyntaxNodeFunction* function);
+internal bool validate_node_semantics(SyntaxNode* node, SyntaxNodeFunction* containing_function) {
+	switch (node->kind) {
+		case SyntaxNodeKind::BinaryOperation: {
+			auto binary_operation = (SyntaxNodeBinaryOperation*)node;
+			node->result = allocate<Value>(&heap_stack);
+			
+			if (binary_operation->operator_keyword == Keyword::assign) {
+				if (binary_operation->operands[0]->result->type != binary_operation->operands[1]->result->type) {
+					String error_message;
+					zero(&error_message);
+					write(&error_message, *binary_operation->site, &heap_stack);
+					write(&error_message, "Type error: cannot assign ", &heap_stack);
+					write(&error_message, binary_operation->operands[1]->result->type, &heap_stack);
+					write(&error_message, " to ", &heap_stack);
+					write(&error_message, binary_operation->operands[0]->result->type, &heap_stack);
+					write(&error_message, "\n", &heap_stack);
+					print(error_message);
+					return false;
+				}
+				
+				node->result->type = binary_operation->operands[0]->result->type;
+			} else {
+				//Arithmetic operator
+				fox_for (operand_index, 2) {
+					auto operand = binary_operation->operands[operand_index];
+					if (operand->result->type != Type::integer) {
+						String error_message;
+						zero(&error_message);
+						write(&error_message, *operand->site, &heap_stack);
+						write(&error_message, "Type error: operand of binary operation must be integers.\n", &heap_stack);
+						write(&error_message, "Type is ", &heap_stack);
+						write(&error_message, operand->result->type, &heap_stack);
+						write(&error_message, "\n", &heap_stack);
+						print(error_message);
+						return false;
+					}
+				}
+				
+				node->result->type = Type::integer;
+			}
+		} break;
+		
+		case SyntaxNodeKind::Identifier: {
+			auto identifier = ((SyntaxNodeIdentifier*)node)->identifier;
+			Value* identified_value = nullptr;
+			fox_for (declaration_index, containing_function->declarations.length) {
+				auto declaration = &containing_function->declarations[declaration_index];
+				if (declaration->identifier == identifier) {
+					identified_value = declaration;
+					break;
+				}
+			}
+			
+			if (!identified_value) {
+				String error_message;
+				zero(&error_message);
+				write(&error_message, *node->site, &heap_stack);
+				write(&error_message, "Semantic error: undeclared identifier ", &heap_stack);
+				write(&error_message, identifier, &heap_stack);
+				write(&error_message, "\n", &heap_stack);
+				print(error_message);
+				return false;
+			}
+			
+			node->result = identified_value;
+		} break;
+		
+		case SyntaxNodeKind::IntegerLiteral: {
+			node->result = allocate<Value>(&heap_stack);
+			node->result->type = Type::integer;
+		} break;
+		
+		case SyntaxNodeKind::StringLiteral: {
+			node->result = allocate<Value>(&heap_stack);
+			node->result->type = Type::string;
+		} break;
+		
+		case SyntaxNodeKind::Type: {
+			auto type_node = (SyntaxNodeType*)node;
+			fox_assert(type_node->type == Type::integer);
+		} break;
+		
+		case SyntaxNodeKind::Function: {
+			//Ignore since we validate these in validate_semantics
+		} break;
+	}
+	
+	return true;
+}
 
-internal b8 validate_semantics(LinearizerContext* linearizer) {
+internal bool validate_function_semantics(SyntaxNodeFunction* function) {
+	fox_for (node_index, function->linear_nodes.length) {
+		if (!validate_node_semantics(function->linear_nodes[node_index], function)) {
+			return false;
+		}
+	}
+	
+	return true;
+}
+
+//Semantic validation is responsible for determining the types of expressions and statements
+//and ensuring the rules of the language are upheld
+internal bool validate_semantics(LinearizerContext* linearizer) {
 	fox_for (function_index, linearizer->functions.length) {
 		if (!validate_function_semantics(linearizer->functions[function_index])) {
 			return false;
 		}
 	}
-	return validate_function_semantics(&linearizer->global_function);
-}
-
-internal b8 validate_function_semantics(SyntaxNodeFunction* function) {
 	
+	return validate_function_semantics(&linearizer->global_function);
 }
 
 //---Interpreter
