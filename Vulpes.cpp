@@ -232,6 +232,7 @@ Optional<Array<Token>> lex(String source, ConstString path) {
 	zero(&tokens);
 	
 	//Replace '\r\n' with ' \n'
+	// and    '\r'   with '\n'
 	fox_for (source_index, source.length) {
 		if (source[source_index] == '\r') {
 			if (source_index + 1 < source.length && source[source_index + 1] == '\n') {
@@ -263,20 +264,81 @@ Optional<Array<Token>> lex(String source, ConstString path) {
 		site_cursor.column += amount;
 	};
 	
+	auto increment_cursor_to_next_line = [&]() {
+		cursor++;
+		site_cursor.line++;
+		site_cursor.line_start = cursor;
+		site_cursor.column = 1;
+	};
+	
 	while (cursor < source_end) {
-		//Skip whitespace
-		while (is_space_character(cursor)) {
-			if (*cursor == '\n') {
-				cursor++;
-				site_cursor.line++;
-				site_cursor.line_start = cursor;
-				site_cursor.column = 1;
-			} else {
-				increment_cursor();
+		auto skipped_any = true;
+		while (skipped_any) {
+			skipped_any = false;
+			
+			//Skip whitespace
+			while (is_space_character(cursor)) {
+				skipped_any = true;
+				if (*cursor == '\n') {
+					increment_cursor_to_next_line();
+				} else {
+					increment_cursor();
+				}
+				
+				if (cursor == source_end) {
+					return tokens;
+				}
 			}
 			
-			if (cursor == source_end) {
-				return tokens;
+			//Skip comments
+			if (cursor + 1 < source_end && cursor[0] == '/') {
+				if (cursor[1] == '/') {
+					skipped_any = true;
+					add_to_cursor(2);
+					while (cursor < source_end && *cursor != '\n') {
+						increment_cursor();
+					}
+					
+					if (cursor != source_end) {
+						//cursor == '\n'
+						increment_cursor_to_next_line();
+					}
+				} else if (cursor[1] == '*') {
+					auto start_of_block_comment = site_cursor;
+					skipped_any = true;
+					add_to_cursor(2);
+					
+					fuint nested_comment_counter = 1;
+					while (nested_comment_counter) {
+						while (cursor < source_end && *cursor != '/' && *cursor != '*') {
+							if (*cursor == '\n') {
+								increment_cursor_to_next_line();
+							} else {
+								increment_cursor();
+							}
+						}
+						
+						if (cursor + 1 < source_end) {
+							if (cursor[0] == '*' && cursor[1] == '/') {
+								nested_comment_counter--;
+								add_to_cursor(2);
+							} else if (cursor[0] == '/' && cursor[1] == '*') {
+								nested_comment_counter++;
+								add_to_cursor(2);
+							} else {
+								increment_cursor();
+							}
+						} else {
+							//We hit the end of the file before closing our block comment
+							String error_message;
+							zero(&error_message);
+							write(&error_message, start_of_block_comment, &heap_stack);
+							write(&error_message, "Syntax error: didn't close block comment before end of file.\n", &heap_stack);
+							print(error_message);
+							return nil;
+						}
+					}
+				}
 			}
 		}
 		
