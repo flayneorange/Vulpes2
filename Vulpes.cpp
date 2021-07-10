@@ -606,7 +606,7 @@ internal void write(String* buffer, SyntaxNode* syntax_node, fuint indent, Alloc
 			write_function_opening(buffer, function, allocator);
 			write(buffer, function->body, indent + 1, allocator);
 			write_indent(buffer, indent, allocator);
-			write(buffer, "}\n", allocator);
+			write(buffer, "}", allocator);
 		} break;
 		
 		case SyntaxNodeKind::Type: {
@@ -914,7 +914,7 @@ struct LinearizerContext {
 
 //---Linearizer
 internal bool linearize_function(LinearizerContext* linearizer, SyntaxNodeFunction* function);
-internal bool linearize_node(LinearizerContext* linearizer, SyntaxNode* node, SyntaxNodeFunction* containing_function);
+internal bool linearize_node(LinearizerContext* linearizer, SyntaxNode* node, SyntaxNodeFunction* containing_function, bool is_statement = false);
 internal void push_node(SyntaxNode* node, SyntaxNodeFunction* containing_function);
 internal void print_statement_does_nothing_warning(SyntaxNode* statement);
 
@@ -945,7 +945,7 @@ internal bool linearize_function(LinearizerContext* linearizer, SyntaxNodeFuncti
 	}
 	
 	fox_for (statement_index, function->body.length) {
-		if (!linearize_node(linearizer, function->body[statement_index], function)) {
+		if (!linearize_node(linearizer, function->body[statement_index], function, true)) {
 			return false;
 		}
 	}
@@ -953,7 +953,7 @@ internal bool linearize_function(LinearizerContext* linearizer, SyntaxNodeFuncti
 	return true;
 }
 
-internal bool linearize_node(LinearizerContext* linearizer, SyntaxNode* node, SyntaxNodeFunction* containing_function) {
+internal bool linearize_node(LinearizerContext* linearizer, SyntaxNode* node, SyntaxNodeFunction* containing_function, bool is_statement) {
 	switch (node->kind) {
 		case SyntaxNodeKind::BinaryOperation: {
 			auto binary_operation = (SyntaxNodeBinaryOperation*)node;
@@ -999,7 +999,7 @@ internal bool linearize_node(LinearizerContext* linearizer, SyntaxNode* node, Sy
 		case SyntaxNodeKind::Identifier:
 		case SyntaxNodeKind::IntegerLiteral:
 		case SyntaxNodeKind::StringLiteral: {
-			if (containing_function == &linearizer->global_function) {
+			if (is_statement) {
 				print_statement_does_nothing_warning(node);
 			}
 			
@@ -1039,16 +1039,16 @@ internal void print_statement_does_nothing_warning(SyntaxNode* statement) {
 
 template<typename AllocatorType>
 internal void write(String* buffer, LinearizerContext* linearizer, AllocatorType* allocator) {
-	write(buffer, "Functions:\n\n", allocator);
 	fox_for (function_index, linearizer->functions.length) {
 		auto function = linearizer->functions[function_index];
-		write_function_opening(buffer, function, allocator);
+		if (function == &linearizer->global_function) {
+			write(buffer, "function global_function() {\n", allocator);
+		} else {
+			write_function_opening(buffer, function, allocator);
+		}
 		write(buffer, function->linear_nodes, 1, allocator);
 		write(buffer, "}\n\n", allocator);
 	}
-	
-	write(buffer, "Global statements:\n", allocator);
-	write(buffer, linearizer->global_function.linear_nodes, 1, allocator);
 }
 
 //---Validater
@@ -1186,12 +1186,14 @@ internal void interpret(String file_string, ConstString file_path) {
 #if enable_lexer_print
 	String tokenized_file;
 	zero(&tokenized_file);
+	write(&tokenized_file, "----------Lexer Output----------\n", &heap_stack);
 	fox_for (itoken, tokens.length) {
 		write(&tokenized_file, tokens[itoken], &heap_stack);
 		write(&tokenized_file, "\n", &heap_stack);
 		write(&tokenized_file, tokens[itoken].site, &heap_stack);
 		write(&tokenized_file, "\n", &heap_stack);
 	}
+	write(&tokenized_file, "\n\n", &heap_stack);
 	print(tokenized_file);
 #endif
 	
@@ -1202,7 +1204,9 @@ internal void interpret(String file_string, ConstString file_path) {
 #if enable_parser_print
 	String syntax_tree_string;
 	zero(&syntax_tree_string);
+	write(&syntax_tree_string, "\n\n----------Parser Output----------\n", &heap_stack);
 	write(&syntax_tree_string, syntax_tree, 0, &heap_stack);
+	write(&syntax_tree_string, "\n\n", &heap_stack);
 	print(syntax_tree_string);
 #endif
 	
@@ -1214,7 +1218,9 @@ internal void interpret(String file_string, ConstString file_path) {
 #if enable_linearizer_print
 	String linearizer_string;
 	zero(&linearizer_string);
+	write(&linearizer_string, "\n\n----------Linearizer Output----------\n", &heap_stack);
 	write(&linearizer_string, &linearizer, &heap_stack);
+	write(&linearizer_string, "\n\n", &heap_stack);
 	print(linearizer_string);
 #endif
 	
