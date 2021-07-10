@@ -156,6 +156,7 @@ static_assert((fuint)Keyword::keyword_count == fox_array_length(keyword_strings)
 			  && (fuint)Keyword::keyword_count == fox_array_length(precedences));
 
 enum class Associativity : u8 {
+	invalid,
 	left,
 	right,
 };
