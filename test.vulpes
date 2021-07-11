@@ -5,12 +5,17 @@
 
 function hello(x: int, y: int): int {
 	number_of_foxes: int = 2 - 3 + 2 * 2 / 2
+    return number_of_foxes
+	return number_of_foxes
 }
+
 /*
 test of nested/*&
 block comments ** * * * /
 /**/*/
 */
+
+
 
 function hello2(): int {
 	'Joey\n hello\''
