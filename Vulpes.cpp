@@ -2,6 +2,7 @@
 #define enable_lexer_print 0
 #define enable_parser_print 0
 #define enable_linearizer_print 0
+#define enable_c_backend_print 1
 
 //---Includes
 #include "foxlib.hpp"
@@ -1492,6 +1493,8 @@ internal String compile_c(LinearizerContext* linearizer) {
 	fox_for (function_index, linearizer->functions.length) {
 		compile_function_c(&c_code, linearizer->functions[function_index]);
 	}
+	
+	return c_code;
 }
 
 //---Interpreter
@@ -1542,7 +1545,15 @@ internal void interpret(String file_string, ConstString file_path) {
 #endif
 		
 		if (validate_semantics(&linearizer)) {
-			//...
+			auto c_code = compile_c(&linearizer);
+#if enable_c_backend_print
+			String c_code_console_output;
+			zero(&c_code_console_output);
+			write(&c_code_console_output, "\n\n----------C Backend Output----------\n", &heap_stack);
+			write(&c_code_console_output, c_code, &heap_stack);
+			write(&c_code_console_output, "\n\n", &heap_stack);
+			print(c_code_console_output);
+#endif
 		}
 	}
 }
