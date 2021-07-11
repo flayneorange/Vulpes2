@@ -520,6 +520,28 @@ Optional<Array<Token>> lex(String source, ConstString path) {
 	return tokens;
 }
 
+//---Backend types
+struct CBackendValue {
+	ConstString variable_name;
+	u32 intermediate_id;
+	b8 is_intermediate; //@todo maybe this should be replaced by a kind
+};
+
+internal CBackendValue c_backend_value_from_named_value(ConstString name) {
+	CBackendValue backend_value;
+	zero(&backend_value);
+	backend_value.variable_name = name;
+	return backend_value;
+}
+
+internal CBackendValue c_backend_value_from_intermediate_id(u32 intermediate_id) {
+	CBackendValue backend_value;
+	zero(&backend_value);
+	backend_value.intermediate_id = intermediate_id;
+	backend_value.is_intermediate = true;
+	return backend_value;
+}
+
 //---Linearizer types
 struct SyntaxNode;
 struct SyntaxNodeFunction;
@@ -548,9 +570,11 @@ internal void write(String* buffer, Type type, AllocatorType* allocator) {
 }
 
 struct Value {
+	CBackendValue backend_value;
 	SourceSite* declaration_site;
 	ConstString identifier;
 	Type type;
+	b8 is_argument;
 };
 
 //---Parser
@@ -1044,6 +1068,7 @@ internal bool linearize_function(LinearizerContext* linearizer, SyntaxNodeFuncti
 		argument_value->type = Type::integer;
 		//@todo better site for this
 		argument_value->declaration_site = function->site;
+		argument_value->is_argument = true;
 	}
 	
 	fox_for (statement_index, function->body.length) {
@@ -1196,6 +1221,7 @@ internal bool validate_syntax_node_semantics(SyntaxNode* syntax_node, SyntaxNode
 				//result is created during linearization which handles the actual declaration aspect
 				binary_operation->result->type = type->type;
 			} else if (binary_operation->operator_keyword == Keyword::assign) {
+				//@bug we are not checking if the left side is an l-value
 				if (binary_operation->operands[0]->result->type != binary_operation->operands[1]->result->type) {
 					String error_message;
 					zero(&error_message);
@@ -1334,6 +1360,140 @@ internal bool validate_semantics(LinearizerContext* linearizer) {
 	return true;
 }
 
+//---C backend
+internal void compile_intermediate_constant_name_c(String* c_code, u32 intermediate_id) {
+	fox_assert(intermediate_id);
+	write(c_code, "vulpes_internal_intermediate", &heap_stack);
+	write_uint(c_code, intermediate_id, &heap_stack);
+}
+
+internal void compile_value_c(String* c_code, CBackendValue backend_value) {
+	if (backend_value.is_intermediate) {
+		compile_intermediate_constant_name_c(c_code, backend_value.intermediate_id);
+	} else {
+		fox_assert(backend_value.variable_name);
+		write(c_code, backend_value.variable_name, &heap_stack);
+	}
+}
+
+internal void compile_value_c(String* c_code, Value* value) {
+	compile_value_c(c_code, value->backend_value);
+}
+
+internal void compile_intermediate_value_open_c(String* c_code, u32 intermediate_id) {
+	write(c_code, "int ", &heap_stack);
+	compile_intermediate_constant_name_c(c_code, intermediate_id);
+	write(c_code, " = (", &heap_stack);
+}
+
+internal void compile_intermediate_value_open_c(String* c_code, CBackendValue backend_value) {
+	fox_assert(backend_value.is_intermediate);
+	compile_intermediate_value_open_c(c_code, backend_value.intermediate_id);
+}
+
+internal void compile_intermediate_value_close_c(String* c_code) {
+	write(c_code, ");\n", &heap_stack);
+}
+
+internal void compile_signature_c(String* c_code, SyntaxNodeFunction* function) {
+	write(c_code, "int ", &heap_stack);
+	write(c_code, function->name, &heap_stack);
+	write(c_code, "(", &heap_stack);
+	
+	fox_for (argument_index, function->argument_names.length) {
+		write(c_code, "int ", &heap_stack);
+		write(c_code, function->argument_names[argument_index], &heap_stack);
+		if (argument_index != function->argument_names.length - 1) {
+			write(c_code, ", ", &heap_stack);
+		}
+	}
+	
+	write(c_code, ")", &heap_stack);
+}
+
+internal void compile_forward_declaration_c(String* c_code, SyntaxNodeFunction* function) {
+	compile_signature_c(c_code, function);
+	write(c_code, ";\n", &heap_stack);
+}
+
+internal void compile_function_c(String* c_code, SyntaxNodeFunction* function) {
+	compile_signature_c(c_code, function);
+	write(c_code, " {\n", &heap_stack);
+	
+	fox_for (declaration_index, function->declarations.length) {
+		auto declaration = &function->declarations[declaration_index];
+		declaration->backend_value = c_backend_value_from_named_value(declaration->identifier);
+		if (!declaration->is_argument) {
+			fox_assert(declaration->type == Type::integer);
+			write(c_code, "int ", &heap_stack);
+			write(c_code, declaration->identifier, &heap_stack);
+			write(c_code, " = 0;\n", &heap_stack);
+		}
+	}
+	
+	u32 intermediate_id_cursor = 0;
+	
+	fox_for (syntax_node_index, function->linear_syntax_nodes.length) {
+		auto syntax_node = function->linear_syntax_nodes[syntax_node_index];
+		switch (syntax_node->kind) {
+			case SyntaxNodeKind::UnaryOperation: {
+				auto unary_operation = (SyntaxNodeUnaryOperation*)syntax_node;
+				fox_assert(unary_operation->operator_keyword == Keyword::return_keyword);
+				write(c_code, "return ", &heap_stack);
+				compile_value_c(c_code, unary_operation->operand->result);
+				write(c_code, ";\n", &heap_stack);
+			} break;
+			
+			case SyntaxNodeKind::BinaryOperation: {
+				auto binary_operation = (SyntaxNodeBinaryOperation*)syntax_node;
+				if (binary_operation->operator_keyword != Keyword::declare) {
+					binary_operation->result->backend_value = c_backend_value_from_intermediate_id(++intermediate_id_cursor);
+					compile_intermediate_value_open_c(c_code, binary_operation->result->backend_value);
+					compile_value_c(c_code, binary_operation->operands[0]->result);
+					write(c_code, " ", &heap_stack);
+					write(c_code, keyword_strings[(fuint)binary_operation->operator_keyword], &heap_stack);
+					write(c_code, " ", &heap_stack);
+					compile_value_c(c_code, binary_operation->operands[1]->result);
+					compile_intermediate_value_close_c(c_code);
+				} //else do nothing since declarations are compiled at the start of the scope
+			} break;
+			
+			case SyntaxNodeKind::IntegerLiteral: {
+				auto integer_literal = (SyntaxNodeIntegerLiteral*)syntax_node;
+				integer_literal->result->backend_value = c_backend_value_from_intermediate_id(++intermediate_id_cursor);
+				compile_intermediate_value_open_c(c_code, integer_literal->result->backend_value);
+				write_uint(c_code, integer_literal->integer, &heap_stack);
+				compile_intermediate_value_close_c(c_code);
+			} break;
+			
+			case SyntaxNodeKind::Identifier:
+			case SyntaxNodeKind::StringLiteral: 
+			case SyntaxNodeKind::Type:
+			case SyntaxNodeKind::Function: {
+				//Do nothing
+			} break;
+			
+			default: {
+				fox_unreachable;
+			} break;
+		}
+	}
+}
+
+internal String compile_c(LinearizerContext* linearizer) {
+	String c_code;
+	zero(&c_code);
+	linearizer->global_function.name = "main";
+	
+	fox_for (function_index, linearizer->functions.length) {
+		compile_forward_declaration_c(&c_code, linearizer->functions[function_index]);
+	}
+	
+	fox_for (function_index, linearizer->functions.length) {
+		compile_function_c(&c_code, linearizer->functions[function_index]);
+	}
+}
+
 //---Interpreter
 internal void interpret(String file_string, ConstString file_path) {
 	auto maybe_tokens = lex(file_string, file_path);
@@ -1427,7 +1587,7 @@ int main(int argument_count, char** arguments) {
 			} break;
 		}
 	} else {
-		print("Usage: vulpes.exe <file to compile>\n");
+		print("Usage: vulpes <file to compile>\n");
 	}
 	
 	return 0;
