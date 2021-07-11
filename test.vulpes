@@ -19,4 +19,5 @@ block comments ** * * * /
 
 function hello2(): int {
 	'Joey\n hello\''
+	return 1
 }

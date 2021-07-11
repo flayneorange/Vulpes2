@@ -1364,7 +1364,7 @@ internal bool validate_semantics(LinearizerContext* linearizer) {
 //---C backend
 internal void compile_intermediate_constant_name_c(String* c_code, u32 intermediate_id) {
 	fox_assert(intermediate_id);
-	write(c_code, "vulpes_internal_intermediate", &heap_stack);
+	write(c_code, "__VI_i", &heap_stack);
 	write_uint(c_code, intermediate_id, &heap_stack);
 }
 
@@ -1384,7 +1384,7 @@ internal void compile_value_c(String* c_code, Value* value) {
 internal void compile_intermediate_value_open_c(String* c_code, u32 intermediate_id) {
 	write(c_code, "int ", &heap_stack);
 	compile_intermediate_constant_name_c(c_code, intermediate_id);
-	write(c_code, " = (", &heap_stack);
+	write(c_code, " = ", &heap_stack);
 }
 
 internal void compile_intermediate_value_open_c(String* c_code, CBackendValue backend_value) {
@@ -1393,7 +1393,7 @@ internal void compile_intermediate_value_open_c(String* c_code, CBackendValue ba
 }
 
 internal void compile_intermediate_value_close_c(String* c_code) {
-	write(c_code, ");\n", &heap_stack);
+	write(c_code, ";\n", &heap_stack);
 }
 
 internal void compile_signature_c(String* c_code, SyntaxNodeFunction* function) {
@@ -1426,6 +1426,7 @@ internal void compile_function_c(String* c_code, SyntaxNodeFunction* function) {
 		declaration->backend_value = c_backend_value_from_named_value(declaration->identifier);
 		if (!declaration->is_argument) {
 			fox_assert(declaration->type == Type::integer);
+			write_indent(c_code, 1, &heap_stack);
 			write(c_code, "int ", &heap_stack);
 			write(c_code, declaration->identifier, &heap_stack);
 			write(c_code, " = 0;\n", &heap_stack);
@@ -1440,6 +1441,7 @@ internal void compile_function_c(String* c_code, SyntaxNodeFunction* function) {
 			case SyntaxNodeKind::UnaryOperation: {
 				auto unary_operation = (SyntaxNodeUnaryOperation*)syntax_node;
 				fox_assert(unary_operation->operator_keyword == Keyword::return_keyword);
+				write_indent(c_code, 1, &heap_stack);
 				write(c_code, "return ", &heap_stack);
 				compile_value_c(c_code, unary_operation->operand->result);
 				write(c_code, ";\n", &heap_stack);
@@ -1449,6 +1451,7 @@ internal void compile_function_c(String* c_code, SyntaxNodeFunction* function) {
 				auto binary_operation = (SyntaxNodeBinaryOperation*)syntax_node;
 				if (binary_operation->operator_keyword != Keyword::declare) {
 					binary_operation->result->backend_value = c_backend_value_from_intermediate_id(++intermediate_id_cursor);
+					write_indent(c_code, 1, &heap_stack);
 					compile_intermediate_value_open_c(c_code, binary_operation->result->backend_value);
 					compile_value_c(c_code, binary_operation->operands[0]->result);
 					write(c_code, " ", &heap_stack);
@@ -1462,6 +1465,7 @@ internal void compile_function_c(String* c_code, SyntaxNodeFunction* function) {
 			case SyntaxNodeKind::IntegerLiteral: {
 				auto integer_literal = (SyntaxNodeIntegerLiteral*)syntax_node;
 				integer_literal->result->backend_value = c_backend_value_from_intermediate_id(++intermediate_id_cursor);
+				write_indent(c_code, 1, &heap_stack);
 				compile_intermediate_value_open_c(c_code, integer_literal->result->backend_value);
 				write_uint(c_code, integer_literal->integer, &heap_stack);
 				compile_intermediate_value_close_c(c_code);
@@ -1479,6 +1483,8 @@ internal void compile_function_c(String* c_code, SyntaxNodeFunction* function) {
 			} break;
 		}
 	}
+	
+	write(c_code, "}\n", &heap_stack);
 }
 
 internal String compile_c(LinearizerContext* linearizer) {
