@@ -1,11 +1,11 @@
 //---Program Options
-#define enable_lexer_print 0
-#define enable_parser_print 0
-#define enable_linearizer_print 0
+#define enable_lexer_print 1
+#define enable_parser_print 1
+#define enable_linearizer_print 1
 #define enable_c_backend_print 1
 
 //---Includes
-#include "foxlib.hpp"
+#include "foxlib_platform.hpp"
 
 LinearAllocator heap_stack;
 
@@ -112,11 +112,22 @@ enum class Keyword {
 	subtract,
 	declare,
 	function,
-	integer,
 	return_keyword,
+	integer_u8,
+	integer_u16,
+	integer_u32,
+	integer_u64,
+	integer_uint,
+	integer_s8,
+	integer_s16,
+	integer_s32,
+	integer_s64,
+	integer_int,
 	comma,
 	open_parenthesis,
 	close_parenthesis,
+	open_square, //@rename should this be named open_array or something like that?
+	close_square,
 	open_curly,
 	close_curly,
 	keyword_count
@@ -130,11 +141,22 @@ ConstString keyword_strings[] = {
 	"-",
 	":",
 	"function",
-	"int",
 	"return",
+	"u8",
+	"u16",
+	"u32",
+	"u64",
+	"uint",
+	"s8",
+	"s16",
+	"s32",
+	"s64",
+	"int",
 	",",
 	"(",
 	")",
+	"[",
+	"]",
 	"{",
 	"}",
 };
@@ -147,11 +169,22 @@ u64 precedences[] = {
 	200, // -
 	150, // :
 	0,   // function
-	0,   // int
 	0,   // return
+	0,   // u8
+	0,   // u16
+	0,   // u32
+	0,   // u64
+	0,   // uint
+	0,   // s8
+	0,   // s16
+	0,   // s32
+	0,   // s64
+	0,   // int
 	0,   // ,
 	0,   // (
 	0,   // )
+	0,   // [
+	0,   // ]
 	0,   // {
 	0,   // }
 };
@@ -159,17 +192,24 @@ u64 precedences[] = {
 static_assert((fuint)Keyword::keyword_count == fox_array_length(keyword_strings)
 			  && (fuint)Keyword::keyword_count == fox_array_length(precedences));
 
-enum class Associativity : u8 {
-	invalid,
-	left,
-	right,
-};
+internal bool is_integer_type_keyword(Keyword keyword) {
+	return Keyword::integer_u8 <= keyword && keyword <= Keyword::integer_int;
+}
 
-Associativity get_associativity(Keyword keyword) {
+internal bool is_signed_integer_type_keyword(Keyword keyword) {
+	fox_assert(is_integer_type_keyword(keyword));
+	return keyword >= Keyword::integer_s8;
+}
+
+internal bool is_binary_operator(Keyword keyword) {
+	return Keyword::assign <= keyword && keyword <= Keyword::declare;
+}
+
+bool is_right_associative(Keyword keyword) {
 	if (keyword == Keyword::assign) {
-		return Associativity::right;
+		return true;
 	}
-	return Associativity::left;
+	return false;
 }
 
 enum class TokenKind : u8 {
@@ -190,6 +230,11 @@ struct Token {
 	};
 	TokenKind kind;
 };
+
+//Token classification helpers
+internal bool is_integer_type_keyword(Token token) {
+	return token.kind == TokenKind::keyword && is_integer_type_keyword(token.keyword_value);
+}
 
 template<typename AllocatorType>
 internal void write(String* buffer, Keyword keyword, AllocatorType* allocator) {
@@ -547,34 +592,43 @@ internal CBackendValue c_backend_value_from_intermediate_id(u32 intermediate_id)
 struct SyntaxNode;
 struct SyntaxNodeFunction;
 
-enum class Type : u8 {
-	invalid,
-	integer,
-	string
+//@rename integer type? or do we want floats shoehorned in
+struct AtomicType {
+	u8 size; //size in bytes
+	b8 is_signed;
 };
 
+internal bool is_equal(AtomicType atomic_type0, AtomicType atomic_type1) {
+	return memcmp(&atomic_type0, &atomic_type1, sizeof(AtomicType)) == 0;
+}
+
+internal bool operator==(AtomicType atomic_type0, AtomicType atomic_type1) {
+	return is_equal(atomic_type0, atomic_type1);
+}
+
+internal bool operator!=(AtomicType atomic_type0, AtomicType atomic_type1) {
+	return !is_equal(atomic_type0, atomic_type1);
+}
+
+internal fuint size_in_bits(AtomicType atomic_type) {
+	return atomic_type.size << 3; //Same as size * 2^3 or size * 8
+}
+
 template<typename AllocatorType>
-internal void write(String* buffer, Type type, AllocatorType* allocator) {
-	switch (type) {
-		case Type::integer: {
-			write(buffer, "integer", allocator);
-		} break;
-		
-		case Type::string: {
-			write(buffer, "string", allocator);
-		} break;
-		
-		default: {
-			fox_unreachable;
-		}
+internal void write(String* buffer, AtomicType atomic_type, AllocatorType* allocator) {
+	if (atomic_type.is_signed) {
+		write(buffer, "s", allocator);
+	} else {
+		write(buffer, "u", allocator);
 	}
+	write_uint(buffer, size_in_bits(atomic_type), allocator);
 }
 
 struct Value {
 	CBackendValue backend_value;
 	SourceSite* declaration_site;
 	ConstString identifier;
-	Type type;
+	AtomicType type;
 	b8 is_argument;
 };
 
@@ -583,10 +637,12 @@ enum class SyntaxNodeKind : u8 {
 	Invalid,
 	UnaryOperation,
 	BinaryOperation,
+	ArrayAccess,
 	Identifier,
 	IntegerLiteral,
 	StringLiteral,
-	Type,
+	AtomicTypeNode,
+	ArrayType,
 	Function,
 };
 
@@ -618,17 +674,23 @@ struct SyntaxNodeStringLiteral : SyntaxNode {
 	ConstString string;
 };
 
-struct SyntaxNodeType : SyntaxNode {
-	Type type;
+struct SyntaxNodeAtomicTypeNode : SyntaxNode {
+	AtomicType atomic_type;
 };
 
 struct SyntaxNodeFunction : SyntaxNode {
-	ConstString name;
-	//@todo argument sites
-	Array<ConstString> argument_names;
+	struct Argument {
+		SourceSite* site; //site of argument name
+		ConstString identifier;
+		SyntaxNodeAtomicTypeNode* type;
+	};
+	
+	ConstString identifier;
+	Array<Argument> arguments;
+	Array<SyntaxNodeAtomicTypeNode*> return_types;
 	Array<SyntaxNode*> body;
 	Array<SyntaxNode*> linear_syntax_nodes;
-	Array<Value> declarations;
+	Array<Value*> declarations;
 };
 
 struct ParseContext {
@@ -714,18 +776,9 @@ internal void write(String* buffer, SyntaxNode* syntax_node, fuint indent, Alloc
 			write(buffer, "}", allocator);
 		} break;
 		
-		case SyntaxNodeKind::Type: {
-			auto type = (SyntaxNodeType*)syntax_node;
-			switch (type->type) {
-				case Type::integer: {
-					write(buffer, "int", allocator);
-				} break;
-				
-				case Type::string: //Currently impossible to actually get this type in a syntax tree
-				default: {
-					fox_unreachable;
-				} break;
-			}
+		case SyntaxNodeKind::AtomicTypeNode: {
+			auto atomic_type_node = (SyntaxNodeAtomicTypeNode*)syntax_node;
+			write(buffer, atomic_type_node->atomic_type, allocator);
 		} break;
 		
 		default: {
@@ -737,12 +790,14 @@ internal void write(String* buffer, SyntaxNode* syntax_node, fuint indent, Alloc
 template<typename AllocatorType>
 internal void write_function_opening(String* buffer, SyntaxNodeFunction* function, AllocatorType* allocator) {
 	write(buffer, "function ", allocator);
-	write(buffer, function->name, allocator);
+	write(buffer, function->identifier, allocator);
 	write(buffer, "(", allocator);
-	fox_for (argument_index, function->argument_names.length) {
-		write(buffer, function->argument_names[argument_index], allocator);
-		write(buffer, ": int", allocator);
-		if (argument_index != function->argument_names.length - 1) {
+	fox_for (argument_index, function->arguments.length) {
+		auto argument = &function->arguments[argument_index];
+		write(buffer, argument->identifier, allocator);
+		write(buffer, ": ", allocator);
+		write(buffer, argument->type->atomic_type, allocator);
+		if (argument_index != function->arguments.length - 1) {
 			write(buffer, ", ", allocator);
 		}
 	}
@@ -903,6 +958,37 @@ internal Optional<Array<SyntaxNode*>> parse_statements(ParseContext* parser, boo
 	return statements;
 }
 
+internal SyntaxNodeAtomicTypeNode* parse_type(ParseContext* parser) {
+	AtomicType atomic_type;
+	zero(&atomic_type);
+	
+	if (is_integer_type_keyword(*parser->cursor)) {
+		auto integer_keyword = parser->cursor->keyword_value;
+		auto is_signed = is_signed_integer_type_keyword(integer_keyword);
+		if (integer_keyword == Keyword::integer_int || integer_keyword == Keyword::integer_uint) {
+			atomic_type.size = 8;
+			atomic_type.is_signed = is_signed;
+		} else {
+			auto first_integer_keyword = is_signed ? Keyword::integer_s8 : Keyword::integer_u8;
+			auto size_index = (u8)integer_keyword - (u8)first_integer_keyword;
+			atomic_type.size = 1 << size_index;
+		}
+	} else {
+		String error_message;
+		zero(&error_message);
+		write(&error_message, parser->cursor->site, &heap_stack);
+		write(&error_message, "Syntax error: expected integer type.\n", &heap_stack);
+		print(error_message);
+		return nullptr;
+	}
+	
+	auto atomic_type_node = create_syntax_node(AtomicTypeNode, &parser->cursor->site);
+	atomic_type_node->atomic_type = atomic_type;
+	
+	parser->cursor++;
+	return atomic_type_node;
+}
+
 internal SyntaxNodeFunction* parse_function(ParseContext* parser) {
 	//function name(argument1: int, argument2: int,): int {}
 	//function name() {}
@@ -911,14 +997,14 @@ internal SyntaxNodeFunction* parse_function(ParseContext* parser) {
 	parser->cursor++;
 	
 	expect_token_kind(parser, TokenKind::identifier, "in function declaration, expected function name.\n");
-	auto function_name = parser->cursor->identifier_value;
+	auto function_identifier = parser->cursor->identifier_value;
 	parser->cursor++;
 	
 	expect_keyword(parser, Keyword::open_parenthesis, "in function declaration, expected open parenthesis.\n");
 	
 	//Parse arguments
-	Array<ConstString> argument_names;
-	zero(&argument_names);
+	Array<SyntaxNodeFunction::Argument> arguments;
+	zero(&arguments);
 	while (true) {
 		if (parser->cursor >= parser->tokens_end) {
 			print_unexpected_end_of_file(parser->cursor[-1].site, "in function declaration, expected close parenthesis or next argument.\n");
@@ -931,10 +1017,16 @@ internal SyntaxNodeFunction* parse_function(ParseContext* parser) {
 		}
 		
 		expect_token_kind(parser, TokenKind::identifier, "in function declaration, expected name of argument.\n");
-		auto argument_name = parser->cursor->identifier_value;
+		auto argument_site = &parser->cursor->site;
+		auto argument_identifier = parser->cursor->identifier_value;
 		parser->cursor++;
 		expect_keyword(parser, Keyword::declare, "in function declaration, expected type of argumnet.\n");
-		expect_keyword(parser, Keyword::integer, "in function declaration, expected type of argumnet.\n");
+		auto argument_type = parse_type(parser);
+		
+		auto new_argument = push_zero(&arguments, &heap_stack);
+		new_argument->site = argument_site;
+		new_argument->identifier = argument_identifier;
+		new_argument->type = argument_type;
 		
 		expect_token_kind(parser, TokenKind::keyword, "in function declaration, expected close parenthesis or next argument.\n");
 		if (!(parser->cursor->keyword_value == Keyword::comma || parser->cursor->keyword_value == Keyword::close_parenthesis)) {
@@ -952,17 +1044,36 @@ internal SyntaxNodeFunction* parse_function(ParseContext* parser) {
 		}
 	}
 	
-	expect_keyword(parser, Keyword::declare, "in function declaration, expected return value.\n");
-	expect_keyword(parser, Keyword::integer, "in function declaration, expected a dumb stupid single integer return value????\n");
+	expect_token_kind(parser, TokenKind::keyword, "in function declaration, expected return value or function body.\n");
 	
+	Array<SyntaxNodeAtomicTypeNode*> return_types;
+	zero(&return_types);
+	if (parser->cursor->keyword_value == Keyword::declare) {
+		parser->cursor++;
+		
+		while (true) {
+			auto return_type = parse_type(parser);
+			push(&return_types, return_type, &heap_stack);
+			
+			expect_token_kind(parser, TokenKind::keyword, "in function declaration, expected next return value or function body.\n");
+			if (parser->cursor->keyword_value == Keyword::open_curly) {
+				break;
+			}
+			expect_keyword(parser, Keyword::comma, "in function declaration, expected next return value or function body.\n");
+			parser->cursor++;
+		}
+	}
+	
+	//@todo clean this up a bit, function x() , int {} will tell us we expected function body at comma
 	expect_keyword(parser, Keyword::open_curly, "in function declaration, expected function body.\n");
 	auto function_body = parse_statements(parser);
 	if (function_body) {
 		expect_keyword(parser, Keyword::close_curly, "in function declaration, expected end of function body.\n");
 		
 		auto function = create_syntax_node(Function, function_site);
-		function->name = function_name;
-		function->argument_names = argument_names;
+		function->identifier = function_identifier;
+		function->arguments = arguments;
+		function->return_types = return_types;
 		function->body = function_body.value;
 		return function;
 	}
@@ -994,15 +1105,12 @@ internal SyntaxNode* parse_expression(ParseContext* parser, u64 outer_precedence
 		} break;
 		
 		case TokenKind::keyword: {
-			auto keyword = parser->cursor->keyword_value;
-			if (keyword == Keyword::integer) {
-				auto type = create_syntax_node(Type, &parser->cursor->site);
-				type->type = Type::integer;
-				left = type;
-			} else {
-				print("Syntax error: unexpected keyword in expression.\n");
-				return nullptr;
-			}
+			String error_message;
+			zero(&error_message);
+			write(&error_message, parser->cursor->site, &heap_stack);
+			write(&error_message, "Syntax error: unexpected keyword in expression.\n", &heap_stack);
+			print(error_message);
+			return nullptr;
 		} break;
 		
 		default: {
@@ -1011,10 +1119,12 @@ internal SyntaxNode* parse_expression(ParseContext* parser, u64 outer_precedence
 	}
 	
 	parser->cursor++;
-	while (parser->cursor < parser->tokens_end && parser->cursor->kind == TokenKind::keyword) {
+	while (parser->cursor < parser->tokens_end
+		   && parser->cursor->kind == TokenKind::keyword
+		   && is_binary_operator(parser->cursor->keyword_value)) {
 		auto operator_keyword = parser->cursor->keyword_value;
 		auto precedence = precedences[(fuint)operator_keyword];
-		if (precedence > outer_precedence || (precedence == outer_precedence && get_associativity(operator_keyword) == Associativity::right)) {
+		if (precedence > outer_precedence || (precedence == outer_precedence && is_right_associative(operator_keyword))) {
 			//Currently we only have binary operators
 			auto binary_operation_site = &parser->cursor->site;
 			auto binary_operator = create_syntax_node(BinaryOperation, binary_operation_site);
@@ -1023,7 +1133,13 @@ internal SyntaxNode* parse_expression(ParseContext* parser, u64 outer_precedence
 			
 			parser->cursor++;
 			if (parser->cursor < parser->tokens_end) {
-				auto right = parse_expression(parser, precedence);
+				SyntaxNode* right = nullptr;
+				if (binary_operator->operator_keyword == Keyword::declare) {
+					right = parse_type(parser);
+				} else {
+					right = parse_expression(parser, precedence);
+				}
+				
 				if (right) {
 					binary_operator->operands[1] = right;
 					left = binary_operator;
@@ -1063,13 +1179,14 @@ internal bool linearize(LinearizerContext* linearizer, Array<SyntaxNode*> statem
 internal bool linearize_function(LinearizerContext* linearizer, SyntaxNodeFunction* function) {
 	push(&linearizer->functions, function, &heap_stack);
 	
-	fox_for (argument_index, function->argument_names.length) {
-		auto argument_value = push_zero(&function->declarations, &heap_stack);
-		argument_value->identifier = function->argument_names[argument_index];
-		argument_value->type = Type::integer;
-		//@todo better site for this
-		argument_value->declaration_site = function->site;
+	fox_for (argument_index, function->arguments.length) {
+		auto argument = &function->arguments[argument_index];
+		auto argument_value = allocate<Value>(&heap_stack);
+		argument_value->identifier = argument->identifier;
+		argument_value->type = argument->type->atomic_type;
+		argument_value->declaration_site = argument->site;
 		argument_value->is_argument = true;
+		push(&function->declarations, argument_value, &heap_stack);
 	}
 	
 	fox_for (statement_index, function->body.length) {
@@ -1107,7 +1224,7 @@ internal bool linearize_syntax_node(LinearizerContext* linearizer, SyntaxNode* s
 				}
 				
 				fox_for (value_index, containing_function->declarations.length) {
-					auto value = &containing_function->declarations[value_index];
+					auto value = containing_function->declarations[value_index];
 					if (value->identifier == declaration_identifier->identifier) {
 						String error_message;
 						zero(&error_message);
@@ -1120,8 +1237,9 @@ internal bool linearize_syntax_node(LinearizerContext* linearizer, SyntaxNode* s
 					}
 				}
 				
-				auto new_value = push_zero(&containing_function->declarations, &heap_stack);
+				auto new_value = allocate<Value>(&heap_stack);
 				new_value->identifier = declaration_identifier->identifier;
+				push(&containing_function->declarations, new_value, &heap_stack);
 				
 				binary_operation->result = new_value;
 			} else {
@@ -1149,10 +1267,9 @@ internal bool linearize_syntax_node(LinearizerContext* linearizer, SyntaxNode* s
 			if (!linearize_function(linearizer, function_node)) {
 				return false;
 			}
-			
-			push_syntax_node(function_node, containing_function);
 		} break;
 		
+		case SyntaxNodeKind::AtomicTypeNode:
 		default: {
 			fox_unreachable;
 		} break;
@@ -1195,7 +1312,8 @@ internal bool validate_syntax_node_semantics(SyntaxNode* syntax_node, SyntaxNode
 		case SyntaxNodeKind::UnaryOperation: {
 			auto unary_operation = (SyntaxNodeUnaryOperation*)syntax_node;
 			fox_assert(unary_operation->operator_keyword == Keyword::return_keyword);
-			if (unary_operation->operand->result->type != Type::integer) {
+			fox_assert(containing_function->return_types.length == 1); //@todo @bug support multiple returns
+			if (unary_operation->operand->result->type != containing_function->return_types[0]->atomic_type) {
 				String error_message;
 				zero(&error_message);
 				write(&error_message, *unary_operation->operand->site, &heap_stack);
@@ -1209,18 +1327,11 @@ internal bool validate_syntax_node_semantics(SyntaxNode* syntax_node, SyntaxNode
 			auto binary_operation = (SyntaxNodeBinaryOperation*)syntax_node;
 			
 			if (binary_operation->operator_keyword == Keyword::declare) {
-				auto type = (SyntaxNodeType*)binary_operation->operands[1];
-				if (type->kind != SyntaxNodeKind::Type) {
-					String error_message;
-					zero(&error_message);
-					write(&error_message, *type->site, &heap_stack);
-					write(&error_message, "Syntax Error: expected type on right side of declaration.\n", &heap_stack);
-					print(error_message);
-					return false;
-				}
+				auto type = (SyntaxNodeAtomicTypeNode*)binary_operation->operands[1];
+				fox_assert(type->kind == SyntaxNodeKind::AtomicTypeNode);
 				
 				//result is created during linearization which handles the actual declaration aspect
-				binary_operation->result->type = type->type;
+				binary_operation->result->type = type->atomic_type;
 			} else if (binary_operation->operator_keyword == Keyword::assign) {
 				//@bug we are not checking if the left side is an l-value
 				if (binary_operation->operands[0]->result->type != binary_operation->operands[1]->result->type) {
@@ -1240,9 +1351,25 @@ internal bool validate_syntax_node_semantics(SyntaxNode* syntax_node, SyntaxNode
 				syntax_node->result->type = binary_operation->operands[0]->result->type;
 			} else {
 				//Arithmetic operator
+				auto operands = binary_operation->operands;
+				if (operands[0]->result->type != operands[1]->result->type) {
+					String error_message;
+					zero(&error_message);
+					write(&error_message, *binary_operation->site, &heap_stack);
+					write(&error_message, "Type error: operands must be same type.\n", &heap_stack);
+					write(&error_message, "Types are ", &heap_stack);
+					write(&error_message, operands[0]->result->type, &heap_stack);
+					write(&error_message, " and ", &heap_stack);
+					write(&error_message, operands[1]->result->type, &heap_stack);
+					write(&error_message, "\n", &heap_stack);
+					print(error_message);
+					return false;
+				}
+				
+#if 0
 				fox_for (operand_index, 2) {
 					auto operand = binary_operation->operands[operand_index];
-					if (operand->result->type != Type::integer) {
+					if (operand->result->type != AtomicType::integer) {
 						String error_message;
 						zero(&error_message);
 						write(&error_message, *operand->site, &heap_stack);
@@ -1254,9 +1381,10 @@ internal bool validate_syntax_node_semantics(SyntaxNode* syntax_node, SyntaxNode
 						return false;
 					}
 				}
+#endif
 				
 				syntax_node->result = allocate<Value>(&heap_stack);
-				syntax_node->result->type = Type::integer;
+				syntax_node->result->type = operands[0]->result->type;
 			}
 		} break;
 		
@@ -1264,7 +1392,7 @@ internal bool validate_syntax_node_semantics(SyntaxNode* syntax_node, SyntaxNode
 			auto identifier = ((SyntaxNodeIdentifier*)syntax_node)->identifier;
 			Value* identified_value = nullptr;
 			fox_for (declaration_index, containing_function->declarations.length) {
-				auto declaration = &containing_function->declarations[declaration_index];
+				auto declaration = containing_function->declarations[declaration_index];
 				if (declaration->identifier == identifier) {
 					identified_value = declaration;
 					break;
@@ -1287,22 +1415,16 @@ internal bool validate_syntax_node_semantics(SyntaxNode* syntax_node, SyntaxNode
 		
 		case SyntaxNodeKind::IntegerLiteral: {
 			syntax_node->result = allocate<Value>(&heap_stack);
-			syntax_node->result->type = Type::integer;
+			syntax_node->result->type.is_signed = true;
+			syntax_node->result->type.size = 8;
 		} break;
 		
-		case SyntaxNodeKind::StringLiteral: {
-			syntax_node->result = allocate<Value>(&heap_stack);
-			syntax_node->result->type = Type::string;
-		} break;
-		
-		case SyntaxNodeKind::Type: {
-			auto type_node = (SyntaxNodeType*)syntax_node;
-			fox_assert(type_node->type == Type::integer);
-		} break;
-		
-		case SyntaxNodeKind::Function: {
-			//Ignore since we validate these in validate_semantics
-		} break;
+		case SyntaxNodeKind::StringLiteral: //@todo
+		case SyntaxNodeKind::AtomicTypeNode:
+		case SyntaxNodeKind::Function:
+		default: {
+			fox_unreachable;
+		}
 	}
 	
 	return true;
@@ -1381,15 +1503,29 @@ internal void compile_value_c(String* c_code, Value* value) {
 	compile_value_c(c_code, value->backend_value);
 }
 
-internal void compile_intermediate_value_open_c(String* c_code, u32 intermediate_id) {
-	write(c_code, "int ", &heap_stack);
+internal void compile_type_c(String* c_code, AtomicType type) {
+	if (!type.is_signed) {
+		write(c_code, "u", &heap_stack);
+	}
+	write(c_code, "int", &heap_stack);
+	write_uint(c_code, size_in_bits(type), &heap_stack);
+	write(c_code, "_t", &heap_stack);
+}
+
+internal void compile_intermediate_value_open_c(String* c_code, u32 intermediate_id, AtomicType intermediate_type) {
+	compile_type_c(c_code, intermediate_type);
+	write(c_code, " ", &heap_stack);
 	compile_intermediate_constant_name_c(c_code, intermediate_id);
 	write(c_code, " = ", &heap_stack);
 }
 
-internal void compile_intermediate_value_open_c(String* c_code, CBackendValue backend_value) {
+internal void compile_intermediate_value_open_c(String* c_code, CBackendValue backend_value, AtomicType intermediate_type) {
 	fox_assert(backend_value.is_intermediate);
-	compile_intermediate_value_open_c(c_code, backend_value.intermediate_id);
+	compile_intermediate_value_open_c(c_code, backend_value.intermediate_id, intermediate_type);
+}
+
+internal void compile_intermediate_value_open_c(String* c_code, Value* value) {
+	compile_intermediate_value_open_c(c_code, value->backend_value, value->type);
 }
 
 internal void compile_intermediate_value_close_c(String* c_code) {
@@ -1397,14 +1533,19 @@ internal void compile_intermediate_value_close_c(String* c_code) {
 }
 
 internal void compile_signature_c(String* c_code, SyntaxNodeFunction* function) {
-	write(c_code, "int ", &heap_stack);
-	write(c_code, function->name, &heap_stack);
+	//@todo @bug support multiple returns
+	fox_assert(function->return_types.length == 1);
+	
+	compile_type_c(c_code, function->return_types[0]->atomic_type);
+	write(c_code, function->identifier, &heap_stack);
 	write(c_code, "(", &heap_stack);
 	
-	fox_for (argument_index, function->argument_names.length) {
-		write(c_code, "int ", &heap_stack);
-		write(c_code, function->argument_names[argument_index], &heap_stack);
-		if (argument_index != function->argument_names.length - 1) {
+	fox_for (argument_index, function->arguments.length) {
+		auto argument = &function->arguments[argument_index];
+		compile_type_c(c_code, argument->type->atomic_type);
+		write(c_code, " ", &heap_stack);
+		write(c_code, argument->identifier, &heap_stack);
+		if (argument_index != function->arguments.length - 1) {
 			write(c_code, ", ", &heap_stack);
 		}
 	}
@@ -1422,12 +1563,12 @@ internal void compile_function_c(String* c_code, SyntaxNodeFunction* function) {
 	write(c_code, " {\n", &heap_stack);
 	
 	fox_for (declaration_index, function->declarations.length) {
-		auto declaration = &function->declarations[declaration_index];
+		auto declaration = function->declarations[declaration_index];
 		declaration->backend_value = c_backend_value_from_named_value(declaration->identifier);
 		if (!declaration->is_argument) {
-			fox_assert(declaration->type == Type::integer);
 			write_indent(c_code, 1, &heap_stack);
-			write(c_code, "int ", &heap_stack);
+			compile_type_c(c_code, declaration->type);
+			write(c_code, " ", &heap_stack);
 			write(c_code, declaration->identifier, &heap_stack);
 			write(c_code, " = 0;\n", &heap_stack);
 		}
@@ -1452,7 +1593,7 @@ internal void compile_function_c(String* c_code, SyntaxNodeFunction* function) {
 				if (binary_operation->operator_keyword != Keyword::declare) {
 					binary_operation->result->backend_value = c_backend_value_from_intermediate_id(++intermediate_id_cursor);
 					write_indent(c_code, 1, &heap_stack);
-					compile_intermediate_value_open_c(c_code, binary_operation->result->backend_value);
+					compile_intermediate_value_open_c(c_code, binary_operation->result);
 					compile_value_c(c_code, binary_operation->operands[0]->result);
 					write(c_code, " ", &heap_stack);
 					write(c_code, keyword_strings[(fuint)binary_operation->operator_keyword], &heap_stack);
@@ -1466,14 +1607,14 @@ internal void compile_function_c(String* c_code, SyntaxNodeFunction* function) {
 				auto integer_literal = (SyntaxNodeIntegerLiteral*)syntax_node;
 				integer_literal->result->backend_value = c_backend_value_from_intermediate_id(++intermediate_id_cursor);
 				write_indent(c_code, 1, &heap_stack);
-				compile_intermediate_value_open_c(c_code, integer_literal->result->backend_value);
+				compile_intermediate_value_open_c(c_code, integer_literal->result);
 				write_uint(c_code, integer_literal->integer, &heap_stack);
 				compile_intermediate_value_close_c(c_code);
 			} break;
 			
 			case SyntaxNodeKind::Identifier:
 			case SyntaxNodeKind::StringLiteral: 
-			case SyntaxNodeKind::Type:
+			case SyntaxNodeKind::AtomicTypeNode:
 			case SyntaxNodeKind::Function: {
 				//Do nothing
 			} break;
@@ -1490,7 +1631,15 @@ internal void compile_function_c(String* c_code, SyntaxNodeFunction* function) {
 internal String compile_c(LinearizerContext* linearizer) {
 	String c_code;
 	zero(&c_code);
-	linearizer->global_function.name = "main";
+	
+	//@hack for the global function, probably just remove the global function lmaoooooo
+	linearizer->global_function.identifier = "main";
+	SyntaxNodeAtomicTypeNode omg_this_is_an_involved_hack;
+	AtomicType s64_atomic_type;
+	s64_atomic_type.size = 8;
+	s64_atomic_type.is_signed = true;
+	omg_this_is_an_involved_hack.atomic_type = s64_atomic_type;
+	push(&linearizer->global_function.return_types, &omg_this_is_an_involved_hack, &heap_stack);
 	
 	fox_for (function_index, linearizer->functions.length) {
 		compile_forward_declaration_c(&c_code, linearizer->functions[function_index]);
@@ -1568,7 +1717,9 @@ int main(int argument_count, char** arguments) {
 	test_foxlib();
 	
 	u64 memory_size = mebibytes(1);
-	initialize(&heap_stack, calloc(memory_size, 1), memory_size);
+	void* memory_block = allocate_large_block_fixed_address_system(nullptr, memory_size);
+	fox_assert(memory_block);
+	initialize(&heap_stack, memory_block, memory_size);
 	
 	if (argument_count > 1) {
 		ConstString file_path = arguments[1];
