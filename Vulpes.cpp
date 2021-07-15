@@ -717,7 +717,6 @@ internal SyntaxNodeType* create_syntax_node_internal(SyntaxNodeKind kind, Source
 }
 #define create_syntax_node(type, site) create_syntax_node_internal<SyntaxNode##type>(SyntaxNodeKind::##type, site);
 
-
 template<typename AllocatorType>
 internal void write(String* buffer, Array<SyntaxNode*> syntax_nodes, fuint indent, AllocatorType* allocator) {
 	fox_for (syntax_node_index, syntax_nodes.length) {
@@ -946,10 +945,20 @@ internal Optional<Array<SyntaxNode*>> parse_statements(ParseContext* parser, boo
 				} break;
 			}
 		} else {
-			auto expression = parse_expression(parser);
-			if (expression) {
-				push(&statements, expression, &heap_stack);
+			//@todo allow global declarations
+			if (inside_function) {
+				auto expression = parse_expression(parser);
+				if (expression) {
+					push(&statements, expression, &heap_stack);
+				} else {
+					return nil;
+				}
 			} else {
+				String error_message;
+				zero(&error_message);
+				write(&error_message, parser->cursor->site, &heap_stack);
+				write(&error_message, "Syntax error: expression outside of function.\n", &heap_stack);
+				print(error_message);
 				return nil;
 			}
 		}
@@ -1161,8 +1170,6 @@ internal SyntaxNode* parse_expression(ParseContext* parser, u64 outer_precedence
 //---Linearizer context
 struct LinearizerContext {
 	Array<SyntaxNodeFunction*> functions;
-	Array<SyntaxNode*> global_statements;
-	SyntaxNodeFunction global_function;
 };
 
 //---Linearizer
@@ -1172,8 +1179,15 @@ internal void push_syntax_node(SyntaxNode* node, SyntaxNodeFunction* containing_
 internal void print_statement_does_nothing_warning(SyntaxNode* statement);
 
 internal bool linearize(LinearizerContext* linearizer, Array<SyntaxNode*> statements) {
-	linearizer->global_function.body = statements;
-	return linearize_function(linearizer, &linearizer->global_function);
+	fox_for (statement_index, statements.length) {
+		auto statement = (SyntaxNodeFunction*)statements[statement_index];
+		fox_assert(statement->kind == SyntaxNodeKind::Function);
+		if (!linearize_function(linearizer, statement)) {
+			return false;
+		}
+	}
+	
+	return true;
 }
 
 internal bool linearize_function(LinearizerContext* linearizer, SyntaxNodeFunction* function) {
@@ -1296,11 +1310,7 @@ template<typename AllocatorType>
 internal void write(String* buffer, LinearizerContext* linearizer, AllocatorType* allocator) {
 	fox_for (function_index, linearizer->functions.length) {
 		auto function = linearizer->functions[function_index];
-		if (function == &linearizer->global_function) {
-			write(buffer, "function global_function() {\n", allocator);
-		} else {
-			write_function_opening(buffer, function, allocator);
-		}
+		write_function_opening(buffer, function, allocator);
 		write(buffer, function->linear_syntax_nodes, 1, allocator);
 		write(buffer, "}\n\n", allocator);
 	}
@@ -1430,7 +1440,7 @@ internal bool validate_syntax_node_semantics(SyntaxNode* syntax_node, SyntaxNode
 	return true;
 }
 
-internal bool validate_function_semantics(SyntaxNodeFunction* function, bool is_global_function) {
+internal bool validate_function_semantics(SyntaxNodeFunction* function) {
 	fox_for (syntax_node_index, function->linear_syntax_nodes.length) {
 		if (!validate_syntax_node_semantics(function->linear_syntax_nodes[syntax_node_index], function)) {
 			return false;
@@ -1453,7 +1463,7 @@ internal bool validate_function_semantics(SyntaxNodeFunction* function, bool is_
 		}
 	}
 	
-	if (!return_found && !is_global_function) {
+	if (!return_found) {
 		//Check for terminating return
 		auto last_statement = (SyntaxNodeUnaryOperation*)function->body[function->body.length - 1];
 		if (last_statement->kind != SyntaxNodeKind::UnaryOperation
@@ -1475,7 +1485,7 @@ internal bool validate_function_semantics(SyntaxNodeFunction* function, bool is_
 internal bool validate_semantics(LinearizerContext* linearizer) {
 	fox_for (function_index, linearizer->functions.length) {
 		auto function = linearizer->functions[function_index];
-		if (!validate_function_semantics(function, function == &linearizer->global_function)) {
+		if (!validate_function_semantics(function)) {
 			return false;
 		}
 	}
@@ -1537,6 +1547,7 @@ internal void compile_signature_c(String* c_code, SyntaxNodeFunction* function) 
 	fox_assert(function->return_types.length == 1);
 	
 	compile_type_c(c_code, function->return_types[0]->atomic_type);
+	write(c_code, " ", &heap_stack);
 	write(c_code, function->identifier, &heap_stack);
 	write(c_code, "(", &heap_stack);
 	
@@ -1631,15 +1642,6 @@ internal void compile_function_c(String* c_code, SyntaxNodeFunction* function) {
 internal String compile_c(LinearizerContext* linearizer) {
 	String c_code;
 	zero(&c_code);
-	
-	//@hack for the global function, probably just remove the global function lmaoooooo
-	linearizer->global_function.identifier = "main";
-	SyntaxNodeAtomicTypeNode omg_this_is_an_involved_hack;
-	AtomicType s64_atomic_type;
-	s64_atomic_type.size = 8;
-	s64_atomic_type.is_signed = true;
-	omg_this_is_an_involved_hack.atomic_type = s64_atomic_type;
-	push(&linearizer->global_function.return_types, &omg_this_is_an_involved_hack, &heap_stack);
 	
 	fox_for (function_index, linearizer->functions.length) {
 		compile_forward_declaration_c(&c_code, linearizer->functions[function_index]);
