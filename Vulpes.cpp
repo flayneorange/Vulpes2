@@ -946,6 +946,7 @@ template<typename AllocatorType>
 internal void write_function_opening(String* buffer, SyntaxNodeFunction* function, AllocatorType* allocator) {
 	write(buffer, "function ", allocator);
 	write(buffer, function->identifier, allocator);
+	
 	write(buffer, "(", allocator);
 	fox_for (argument_index, function->arguments.length) {
 		auto argument = &function->arguments[argument_index];
@@ -956,7 +957,19 @@ internal void write_function_opening(String* buffer, SyntaxNodeFunction* functio
 			write(buffer, ", ", allocator);
 		}
 	}
-	write(buffer, "): int {\n", allocator);
+	write(buffer, ")", allocator);
+	
+	if (function->return_type_nodes) {
+		write(buffer, ": ", allocator);
+		fox_for (return_index, function->return_type_nodes.length) {
+			write(buffer, function->return_type_nodes[return_index], 0, allocator);
+			if (return_index != function->return_type_nodes - 1) {
+				write(buffer, ", ", allocator);
+			}
+		}
+	}
+	
+	write(buffer, " {\n", allocator);
 }
 
 internal bool expect_token_kind_internal(ParseContext* parser, TokenKind kind, ConstString where) {
