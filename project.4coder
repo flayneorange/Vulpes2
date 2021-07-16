@@ -6,8 +6,7 @@ patterns =
 {
 	"*.cpp",
 	"*.hpp",
-	"*.bat",
-	"*.4coder",
+	"*.vulpes",
 };
 
 blacklist_patterns =
