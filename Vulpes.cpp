@@ -1074,13 +1074,14 @@ internal Optional<Array<SyntaxNode*>> parse_statements(ParseContext* parser, boo
 }
 
 internal SyntaxNode* parse_type(ParseContext* parser) {
-	TypeAtomic atomic_type;
-	zero(&atomic_type);
-	
 	//@todo better error message
 	expect_token_kind(parser, TokenKind::keyword, "in type-y place, expected type.\n");
 	
 	if (is_integer_type_keyword(parser->cursor->keyword_value)) {
+		TypeAtomic atomic_type;
+		zero(&atomic_type);
+		atomic_type.kind = TypeKind::Atomic;
+		
 		auto integer_keyword = parser->cursor->keyword_value;
 		auto is_signed = is_signed_integer_type_keyword(integer_keyword);
 		if (integer_keyword == Keyword::integer_int || integer_keyword == Keyword::integer_uint) {
@@ -1100,12 +1101,11 @@ internal SyntaxNode* parse_type(ParseContext* parser) {
 	} else if (parser->cursor->keyword_value == Keyword::open_square) {
 		auto array_type_site = &parser->cursor->site;
 		parser->cursor++;
-		expect_token_kind(parser, TokenKind::integer, "in type declaration, expected integer literal length of array.\n");
 		
+		expect_token_kind(parser, TokenKind::integer, "in type declaration, expected integer literal length of array.\n");
 		u64 array_length = parser->cursor->integer_value;
 		parser->cursor++;
 		expect_keyword(parser, Keyword::close_square, "in type declaration, expected close ].\n");
-		parser->cursor++;
 		auto element_type_node = parse_type(parser);
 		
 		auto array_type_node = create_syntax_node(ArrayType, array_type_site);
@@ -1117,7 +1117,7 @@ internal SyntaxNode* parse_type(ParseContext* parser) {
 	String error_message;
 	zero(&error_message);
 	write(&error_message, parser->cursor->site, &heap_stack);
-	write(&error_message, "Syntax error: expected integer type.\n", &heap_stack);
+	write(&error_message, "Syntax error: expected type.\n", &heap_stack);
 	print(error_message);
 	return nullptr;
 }
@@ -1260,10 +1260,8 @@ internal SyntaxNode* parse_expression(ParseContext* parser, u64 outer_precedence
 		   && parser->cursor->keyword_value == Keyword::open_square) {
 		auto array_access_site = &parser->cursor->site;
 		parser->cursor++;
-		expect_token_kind(parser, TokenKind::integer, "in array access, expected integer literal.\n");
 		auto index_expression = parse_expression(parser, 0);
 		expect_keyword(parser, Keyword::close_square, "in array access, expected close square ].\n");
-		parser->cursor++;
 		
 		auto array_access = create_syntax_node(ArrayAccess, array_access_site);
 		array_access->array_expression = left;
@@ -1440,6 +1438,15 @@ internal bool linearize_syntax_node(LinearizerContext* linearizer, SyntaxNode* s
 			push_syntax_node(binary_operation, containing_function);
 		} break;
 		
+		case SyntaxNodeKind::ArrayAccess: {
+			auto array_access = (SyntaxNodeArrayAccess*)syntax_node;
+			if (!(linearize_syntax_node(linearizer, array_access->array_expression, containing_function)
+				  && linearize_syntax_node(linearizer, array_access->index_expression, containing_function))) {
+				return false;
+			}
+			push_syntax_node(array_access, containing_function);
+		} break;
+		
 		case SyntaxNodeKind::Identifier:
 		case SyntaxNodeKind::IntegerLiteral:
 		case SyntaxNodeKind::StringLiteral: {
@@ -1569,6 +1576,40 @@ internal bool validate_syntax_node_semantics(SyntaxNode* syntax_node, SyntaxNode
 			}
 		} break;
 		
+		case SyntaxNodeKind::ArrayAccess: {
+			auto array_access = (SyntaxNodeArrayAccess*)syntax_node;
+			
+			auto array_expression = array_access->array_expression;
+			auto array_type = array_expression->result->type;
+			if (array_type->kind != TypeKind::FixedLengthArray) {
+				String error_message;
+				zero(&error_message);
+				write(&error_message, *array_expression->site, &heap_stack);
+				write(&error_message, "Semantic error: expected array on left hand side of array access but got ", &heap_stack);
+				write(&error_message, array_type, &heap_stack);
+				write(&error_message, "\n", &heap_stack);
+				print(error_message);
+				return false;
+			}
+			
+			auto index_expression = array_access->index_expression;
+			auto index_type = index_expression->result->type;
+			if (index_type->kind != TypeKind::Atomic) {
+				String error_message;
+				zero(&error_message);
+				write(&error_message, *index_expression->site, &heap_stack);
+				write(&error_message, "Semantic error: expected integer index in array access but got ", &heap_stack);
+				write(&error_message, index_type, &heap_stack);
+				write(&error_message, "\n", &heap_stack);
+				print(error_message);
+				return false;
+			}
+			
+			auto element_value = allocate<Value>(&heap_stack);
+			element_value->type = ((TypeFixedLengthArray*)array_type)->element_type;
+			array_access->result = element_value;
+		} break;
+		
 		case SyntaxNodeKind::Identifier: {
 			auto identifier = ((SyntaxNodeIdentifier*)syntax_node)->identifier;
 			Value* identified_value = nullptr;
@@ -1605,7 +1646,22 @@ internal bool validate_syntax_node_semantics(SyntaxNode* syntax_node, SyntaxNode
 			syntax_node->result = integer_value;
 		} break;
 		
-		case SyntaxNodeKind::StringLiteral: //@todo
+		case SyntaxNodeKind::StringLiteral: {
+			auto string_node = (SyntaxNodeStringLiteral*)syntax_node;
+			
+			auto u8_type = create_type(Atomic);
+			u8_type->size = 1;
+			
+			auto string_type = create_type(FixedLengthArray);
+			string_type->length = string_node->string.length;
+			string_type->element_type = u8_type;
+			
+			auto string_value = allocate<Value>(&heap_stack);
+			string_value->type = string_type;
+			
+			string_node->result = string_value;
+		} break;
+		
 		case SyntaxNodeKind::TypeAtomicNode:
 		case SyntaxNodeKind::Function:
 		default: {
@@ -1674,7 +1730,7 @@ internal bool validate_semantics(LinearizerContext* linearizer) {
 				
 				case SyntaxNodeKind::ArrayType: {
 					auto array_type_node = (SyntaxNodeArrayType*)type_node;
-					auto array_type = allocate<TypeFixedLengthArray>(&heap_stack);
+					auto array_type = create_type(FixedLengthArray);
 					array_type->element_type = array_type_node->element_type_node->type_result;
 					array_type->length = array_type_node->length;
 					array_type_node->type_result = array_type;
@@ -1767,7 +1823,7 @@ internal void compile_intermediate_value_open_c(String* c_code, u32 intermediate
 	write(c_code, " ", &heap_stack);
 	compile_intermediate_constant_name_c(c_code, intermediate_id);
 	compile_type_suffix_c(c_code, intermediate_type);
-	write(c_code, " = ", &heap_stack);
+	write(c_code, " = ", &heap_stack); //@bug this won't assign to arrays correctly
 }
 
 internal void compile_intermediate_value_open_c(String* c_code, CBackendValue backend_value, Type* intermediate_type) {
@@ -1859,6 +1915,18 @@ internal void compile_function_c(String* c_code, SyntaxNodeFunction* function) {
 				} //else do nothing since declarations are compiled at the start of the scope
 			} break;
 			
+			case SyntaxNodeKind::ArrayAccess: {
+				auto array_access = (SyntaxNodeArrayAccess*)syntax_node;
+				write_indent(c_code, 1, &heap_stack);
+				array_access->result->backend_value = c_backend_value_from_intermediate_id(++intermediate_id_cursor);
+				compile_intermediate_value_open_c(c_code, array_access->result);
+				compile_value_c(c_code, array_access->array_expression->result);
+				write(c_code, "[", &heap_stack);
+				compile_value_c(c_code, array_access->index_expression->result);
+				write(c_code, "]", &heap_stack);
+				compile_intermediate_value_close_c(c_code);
+			} break;
+			
 			case SyntaxNodeKind::IntegerLiteral: {
 				auto integer_literal = (SyntaxNodeIntegerLiteral*)syntax_node;
 				integer_literal->result->backend_value = c_backend_value_from_intermediate_id(++intermediate_id_cursor);
@@ -1868,13 +1936,23 @@ internal void compile_function_c(String* c_code, SyntaxNodeFunction* function) {
 				compile_intermediate_value_close_c(c_code);
 			} break;
 			
+			case SyntaxNodeKind::StringLiteral: {
+				auto string_node = (SyntaxNodeStringLiteral*)syntax_node;
+				string_node->result->backend_value = c_backend_value_from_intermediate_id(++intermediate_id_cursor);
+				write_indent(c_code, 1, &heap_stack);
+				compile_intermediate_value_open_c(c_code, string_node->result);
+				write(c_code, "\"", &heap_stack);
+				write(c_code, string_node->string, &heap_stack); //@bug we need to escape this
+				write(c_code, "\"", &heap_stack);
+				compile_intermediate_value_close_c(c_code);
+			} break;
+			
 			case SyntaxNodeKind::Identifier:
-			case SyntaxNodeKind::StringLiteral: 
-			case SyntaxNodeKind::TypeAtomicNode:
-			case SyntaxNodeKind::Function: {
+			case SyntaxNodeKind::TypeAtomicNode: {
 				//Do nothing
 			} break;
 			
+			case SyntaxNodeKind::Function:
 			default: {
 				fox_unreachable;
 			} break;
