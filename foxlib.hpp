@@ -368,6 +368,11 @@ internal void print(ConstString message) {
 	std::cout.write(message.data, message.length);
 }
 
+template<u64 capacity>
+internal void print(InternalString<capacity> message) {
+	std::cout.write(message.data, message.length);
+}
+
 internal void test_arrays() {
 	//Test string conversion
 	ConstString test_hello = "hello";
@@ -435,30 +440,39 @@ internal void test_arrays() {
 }
 
 //---String conversion
-constexpr fuint max_unsigned_integer_string_length = 20;
-constexpr fuint max_signed_integer_string_length = 20;
-
-internal u64 unsigned_integer_from_string(ConstString integer_string) {
-	fox_assert(1 <= integer_string.length && integer_string.length <= max_unsigned_integer_string_length);
+internal u64 unsigned_integer_from_string(ConstString integer_string, u64 base) {
 	u64 result = 0;
-	u64 exponent = 1;
+	u64 exponent = 0;
+	u64 new_exponent = 1;
 	for (s64 integer_string_index = (s64)(integer_string.length - 1); integer_string_index >= 0; --integer_string_index) {
+		//We do this at the loop start since we dont want to make the check if the loop will end
+		fox_assert(new_exponent > exponent); //Detect overflow
+		exponent = new_exponent;
+		
+		u64 digit = 0;
 		auto digit_character = integer_string[integer_string_index];
-		fox_assert('0' <= digit_character && digit_character <= '9');
-		u64 digit = digit_character - '0';
+		if (digit_character <= '9') {
+			fox_assert(digit_character >= '0');
+			digit = digit_character - '0';
+		} else if (digit_character <= 'Z') {
+			fox_assert(digit_character >= 'A');
+			digit = digit_character - 'A' + 10;
+		} else {
+			fox_assert('a' <= digit_character && digit_character <= 'z');
+			digit = digit_character - 'a' + 10;
+		}
+		
 		result += digit * exponent;
-		exponent *= 10;
+		new_exponent = exponent * base;
 	}
 	return result;
 }
 
-internal s64 signed_integer_from_string(ConstString integer_string) {
-	fox_assert(1 <= integer_string.length && integer_string.length <= max_signed_integer_string_length);
-	
+internal s64 signed_integer_from_string(ConstString integer_string, u64 base) {
 	//First parse the unsigned part
 	auto is_negative = integer_string[0] == '-';
 	ConstString unsigned_integer_string = is_negative ? sub_array(integer_string, 1) : integer_string;
-	u64 unsigned_integer = unsigned_integer_from_string(unsigned_integer_string);
+	u64 unsigned_integer = unsigned_integer_from_string(unsigned_integer_string, base);
 	
 	//Check that the absolute_value is ok for a signed value
 	fox_assert(unsigned_integer <= (is_negative ? (1ull << 63) : ((1ull << 63) - 1)));
@@ -469,24 +483,26 @@ internal s64 signed_integer_from_string(ConstString integer_string) {
 
 //internal helper for string_from_unsigned_integer
 //out_buffer is written to back to front and 
-internal char* write_string_from_unsigned_integer(char* buffer_end, u64 integer) {
+internal char* write_string_from_unsigned_integer(char* buffer_end, u64 integer, u64 base) {
+	fox_assert(base <= 255);
 	auto cursor = buffer_end;
 	do {
 		cursor--;
-		auto digit = (u8)(integer % 10);
-		auto digit_character = (char)(digit + '0');
+		auto digit = (u8)(integer % base);
+		auto digit_character = (digit <= 9) ? ((char)(digit + '0')) : ((char)((digit - 10) + 'a'));
 		*cursor = digit_character;
-		integer /= 10;
+		integer /= base;
 	} while (integer);
 	return cursor;
 }
 
-internal InternalString<max_unsigned_integer_string_length> string_from_unsigned_integer(u64 integer) {
+template<u64 max_unsigned_integer_string_length>
+internal InternalString<max_unsigned_integer_string_length> string_from_unsigned_integer(u64 integer, u64 base) {
 	InternalString<max_unsigned_integer_string_length> integer_string;
 	zero(&integer_string);
 	
 	auto buffer_end = integer_string.data + max_unsigned_integer_string_length;
-	auto buffer_start = write_string_from_unsigned_integer(buffer_end, integer);
+	auto buffer_start = write_string_from_unsigned_integer(buffer_end, integer, base);
 	
 	auto length = buffer_end - buffer_start;
 	memmove(integer_string.data, buffer_start, length);
@@ -494,13 +510,14 @@ internal InternalString<max_unsigned_integer_string_length> string_from_unsigned
 	return integer_string;
 }
 
-internal InternalString<max_signed_integer_string_length> string_from_signed_integer(s64 integer) {
+template<u64 max_signed_integer_string_length>
+internal InternalString<max_signed_integer_string_length> string_from_signed_integer(s64 integer, u64 base) {
 	InternalString<max_signed_integer_string_length> integer_string;
 	zero(&integer_string);
 	
 	auto buffer_end = integer_string.data + max_signed_integer_string_length;
 	auto integer_absolute_value = absolute_value(integer);
-	auto buffer_start = write_string_from_unsigned_integer(buffer_end, integer_absolute_value);
+	auto buffer_start = write_string_from_unsigned_integer(buffer_end, integer_absolute_value, base);
 	
 	if (integer < 0) {
 		buffer_start--;
@@ -513,28 +530,124 @@ internal InternalString<max_signed_integer_string_length> string_from_signed_int
 	return integer_string;
 }
 
+#define generate_string_from_integer_for_base(signage, ArgumentType, base, max_digits) internal InternalString<max_digits> string_from_##signage##_integer_##base(ArgumentType integer) { return string_from_##signage##_integer<max_digits>(integer, base); }
+
+//binary
+generate_string_from_integer_for_base(unsigned, u64, 2, 64);
+generate_string_from_integer_for_base(signed, s64, 2, 65);
+
+//seximal
+generate_string_from_integer_for_base(unsigned, u64, 6, 25);
+generate_string_from_integer_for_base(signed, s64, 6, 26);
+
+//octal
+generate_string_from_integer_for_base(unsigned, u64, 8, 22);
+generate_string_from_integer_for_base(signed, s64, 8, 23);
+
+//decimal
+generate_string_from_integer_for_base(unsigned, u64, 10, 20);
+generate_string_from_integer_for_base(signed, s64, 10, 20);
+
+//dozenal
+generate_string_from_integer_for_base(unsigned, u64, 12, 18);
+generate_string_from_integer_for_base(signed, s64, 12, 19);
+
+//hex
+generate_string_from_integer_for_base(unsigned, u64, 16, 16);
+generate_string_from_integer_for_base(signed, s64, 16, 17);
+
 internal void test_string_conversion() {
-	fox_assert(unsigned_integer_from_string("0") == 0ull);
-	fox_assert(unsigned_integer_from_string("69") == 69ull);
-	fox_assert(unsigned_integer_from_string("420") == 420ull);
-	fox_assert(unsigned_integer_from_string("18446744073709551615") == 18446744073709551615ull);
+	//First test exhaustively with 1 base each which do/do not use letters
+	//base 10
+	fox_assert(unsigned_integer_from_string("0", 10) == 0ull);
+	fox_assert(unsigned_integer_from_string("69", 10) == 69ull);
+	fox_assert(unsigned_integer_from_string("420", 10) == 420ull);
+	fox_assert(unsigned_integer_from_string("18446744073709551615", 10) == 18446744073709551615ull);
 	
-	fox_assert(string_from_unsigned_integer(0ull) == "0");
-	fox_assert(string_from_unsigned_integer(69ull) == "69");
-	fox_assert(string_from_unsigned_integer(420ull) == "420");
-	fox_assert(string_from_unsigned_integer(18446744073709551615ull) == "18446744073709551615");
+	fox_assert(string_from_unsigned_integer_10(0ull) == "0");
+	fox_assert(string_from_unsigned_integer_10(69ull) == "69");
+	fox_assert(string_from_unsigned_integer_10(420ull) == "420");
+	fox_assert(string_from_unsigned_integer_10(18446744073709551615ull) == "18446744073709551615");
 	
-	fox_assert(signed_integer_from_string("-9223372036854775808") == -9223372036854775808ll);
-	fox_assert(signed_integer_from_string("-69") == -69ll);
-	fox_assert(signed_integer_from_string("0") == 0ll);
-	fox_assert(signed_integer_from_string("420") == 420ll);
-	fox_assert(signed_integer_from_string("9223372036854775807") == 9223372036854775807ll);
+	fox_assert(signed_integer_from_string("-9223372036854775808", 10) == -9223372036854775808ll);
+	fox_assert(signed_integer_from_string("-69", 10) == -69ll);
+	fox_assert(signed_integer_from_string("0", 10) == 0ll);
+	fox_assert(signed_integer_from_string("420", 10) == 420ll);
+	fox_assert(signed_integer_from_string("9223372036854775807", 10) == 9223372036854775807ll);
 	
-	fox_assert(string_from_signed_integer(-9223372036854775808ll) == "-9223372036854775808");
-	fox_assert(string_from_signed_integer(-69ll) == "-69");
-	fox_assert(string_from_signed_integer(0ll) == "0");
-	fox_assert(string_from_signed_integer(420ll) == "420");
-	fox_assert(string_from_signed_integer(9223372036854775807ll) == "9223372036854775807");
+	fox_assert(string_from_signed_integer_10(-9223372036854775808ll) == "-9223372036854775808");
+	fox_assert(string_from_signed_integer_10(-69ll) == "-69");
+	fox_assert(string_from_signed_integer_10(0ll) == "0");
+	fox_assert(string_from_signed_integer_10(420ll) == "420");
+	fox_assert(string_from_signed_integer_10(9223372036854775807ll) == "9223372036854775807");
+	
+	//base 16
+	fox_assert(unsigned_integer_from_string("0", 16) == 0ull);
+	fox_assert(unsigned_integer_from_string("45", 16) == 69ull);
+	fox_assert(unsigned_integer_from_string("1a4", 16) == 420ull);
+	fox_assert(unsigned_integer_from_string("FFFFFFFFFFFFFFFF", 16) == 18446744073709551615ull);
+	
+	fox_assert(string_from_unsigned_integer_16(0ull) == "0");
+	fox_assert(string_from_unsigned_integer_16(69ull) == "45");
+	fox_assert(string_from_unsigned_integer_16(420ull) == "1a4");
+	fox_assert(string_from_unsigned_integer_16(18446744073709551615ull) == "ffffffffffffffff");
+	
+	fox_assert(signed_integer_from_string("-8000000000000000", 16) == -9223372036854775808ll);
+	fox_assert(signed_integer_from_string("-45", 16) == -69ll);
+	fox_assert(signed_integer_from_string("0", 16) == 0ll);
+	fox_assert(signed_integer_from_string("1A4", 16) == 420ll);
+	fox_assert(signed_integer_from_string("7fffffffffffffff", 16) == 9223372036854775807ll);
+	
+	fox_assert(string_from_signed_integer_16(-9223372036854775808ll) == "-8000000000000000");
+	fox_assert(string_from_signed_integer_16(-69ll) == "-45");
+	fox_assert(string_from_signed_integer_16(0ll) == "0");
+	fox_assert(string_from_signed_integer_16(420ll) == "1a4");
+	fox_assert(string_from_signed_integer_16(9223372036854775807ll) == "7fffffffffffffff");
+	
+	//Next test maximums and signed minimum to ensure our max digit counts are correct
+	//base 2
+	fox_assert(unsigned_integer_from_string("1111111111111111111111111111111111111111111111111111111111111111", 2) == 18446744073709551615ull);
+	
+	fox_assert(string_from_unsigned_integer_2(18446744073709551615ull) == "1111111111111111111111111111111111111111111111111111111111111111");
+	
+	fox_assert(signed_integer_from_string("-1000000000000000000000000000000000000000000000000000000000000000", 2) == -9223372036854775808ll);
+	fox_assert(signed_integer_from_string("111111111111111111111111111111111111111111111111111111111111111", 2) == 9223372036854775807ll);
+	
+	fox_assert(string_from_signed_integer_2(-9223372036854775808ll) == "-1000000000000000000000000000000000000000000000000000000000000000");
+	fox_assert(string_from_signed_integer_2(9223372036854775807ll) == "111111111111111111111111111111111111111111111111111111111111111");
+	
+	//base 6
+	fox_assert(unsigned_integer_from_string("3520522010102100444244423", 6) == 18446744073709551615ull);
+	
+	fox_assert(string_from_unsigned_integer_6(18446744073709551615ull) == "3520522010102100444244423");
+	
+	fox_assert(signed_integer_from_string("-1540241003031030222122212", 6) == -9223372036854775808ll);
+	fox_assert(signed_integer_from_string("1540241003031030222122211", 6) == 9223372036854775807ll);
+	
+	fox_assert(string_from_signed_integer_6(-9223372036854775808ll) == "-1540241003031030222122212");
+	fox_assert(string_from_signed_integer_6(9223372036854775807ll) == "1540241003031030222122211");
+	
+	//base 8
+	fox_assert(unsigned_integer_from_string("1777777777777777777777", 8) == 18446744073709551615ull);
+	
+	fox_assert(string_from_unsigned_integer_8(18446744073709551615ull) == "1777777777777777777777");
+	
+	fox_assert(signed_integer_from_string("-1000000000000000000000", 8) == -9223372036854775808ll);
+	fox_assert(signed_integer_from_string("777777777777777777777", 8) == 9223372036854775807ll);
+	
+	fox_assert(string_from_signed_integer_8(-9223372036854775808ll) == "-1000000000000000000000");
+	fox_assert(string_from_signed_integer_8(9223372036854775807ll) == "777777777777777777777");
+	
+	//base 12
+	fox_assert(unsigned_integer_from_string("839365134A2A240713", 12) == 18446744073709551615ull);
+	
+	fox_assert(string_from_unsigned_integer_12(18446744073709551615ull) == "839365134a2a240713");
+	
+	fox_assert(signed_integer_from_string("-41A792678515120368", 12) == -9223372036854775808ll);
+	fox_assert(signed_integer_from_string("41A792678515120367", 12) == 9223372036854775807ll);
+	
+	fox_assert(string_from_signed_integer_12(-9223372036854775808ll) == "-41a792678515120368");
+	fox_assert(string_from_signed_integer_12(9223372036854775807ll) == "41a792678515120367");
 }
 
 //---Allocators
@@ -723,7 +836,7 @@ internal void write_char(ArrayType* array, char character, AllocatorType* alloca
 
 template<typename ArrayType, typename AllocatorType = void>
 internal void write_uint(ArrayType* array, u64 integer, AllocatorType* allocator = nullptr) {
-	write(array, string_from_unsigned_integer(integer), allocator);
+	write(array, string_from_unsigned_integer_10(integer), allocator);
 }
 
 internal void test_dynamic_arrays() {

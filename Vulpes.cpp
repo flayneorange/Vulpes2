@@ -463,7 +463,7 @@ Optional<Array<Token>> lex(String source, ConstString path) {
 				number_string.data = number_start;
 				number_string.length = cursor - number_start;
 				
-				u64 integer_value = unsigned_integer_from_string(number_string);
+				u64 integer_value = unsigned_integer_from_string(number_string, 10);
 				
 				auto new_token = push_new_token(TokenKind::integer, number_start_site);
 				new_token->integer_value = integer_value;
