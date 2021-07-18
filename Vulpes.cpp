@@ -716,6 +716,8 @@ internal void write(String* buffer, Type* type, AllocatorType* allocator) {
 //---Linearizer types
 struct SyntaxNode;
 struct SyntaxNodeFunction;
+struct SyntaxNodeIfElse;
+struct ControlFlowNode;
 
 struct Value {
 	CBackendValue backend_value;
@@ -734,6 +736,56 @@ struct LinearizerContext {
 	Array<SyntaxNodeFunction*> functions;
 	Array<LinearizedType*> linearized_types;
 };
+
+struct ScopedStatements {
+	SyntaxNodeFunction* containing_function;
+	ScopedStatements* outer_scope;
+	
+	Array<SyntaxNode*> statements;
+	Array<Value*> declarations;
+};
+
+enum class ControlFlowNodeKind {
+	Invalid,
+	Unconditional,
+	IfElse,
+};
+
+//Syntax nodes in control flow graphs are always in dependency order
+//i.e. x = y + z would be stored as
+//x
+//y
+//z
+//y + z
+//x = y + z
+//they are guaranteed not to terminate in the middle of a block
+//they must either termiante at the end or not at all
+struct ControlFlowNode {
+	ControlFlowNodeKind kind;
+	b8 definitely_returns;
+	b8 unreachable;
+};
+
+struct ControlFlowNodeUnconditional : ControlFlowNode {
+	Array<SyntaxNode*> syntax_nodes;
+};
+
+struct ControlFlowNodeIfElse : ControlFlowNode {
+	Array<SyntaxNode*> condition_syntax_nodes;
+	
+	Array<ControlFlowNode*> if_control_flow_nodes;
+	Array<ControlFlowNode*> else_control_flow_nodes;
+	
+	SyntaxNodeIfElse* syntax_node;
+};
+
+template<typename ControlFlowNodeType>
+internal ControlFlowNodeType* create_control_flow_node_internal(ControlFlowNodeKind kind) {
+	auto new_control_flow_node = allocate<ControlFlowNodeType>(&heap_stack);
+	new_control_flow_node->kind = kind;
+	return new_control_flow_node;
+}
+#define create_control_flow_node(ControlFlowNodeType) create_control_flow_node_internal<ControlFlowNode##ControlFlowNodeType>(ControlFlowNodeKind::##ControlFlowNodeType)
 
 //---Parser
 enum class SyntaxNodeKind : u8 {
@@ -790,15 +842,6 @@ struct SyntaxNodeArrayAccess : SyntaxNode {
 	SyntaxNode* index_expression;
 };
 
-struct ScopedStatements {
-	SyntaxNodeFunction* containing_function;
-	ScopedStatements* outer_scope;
-	
-	Array<SyntaxNode*> statements;
-	Array<SyntaxNode*> syntax_nodes;
-	Array<Value*> declarations;
-};
-
 struct SyntaxNodeFunction : SyntaxNode {
 	struct Argument {
 		SourceSite* site; //@rename declaration_site
@@ -813,6 +856,7 @@ struct SyntaxNodeFunction : SyntaxNode {
 	Array<Type*> return_types;
 	
 	ScopedStatements body;
+	Array<ControlFlowNode*> control_flow_nodes;
 };
 
 struct SyntaxNodeIfElse : SyntaxNode {
@@ -1478,11 +1522,8 @@ internal Optional<Array<SyntaxNode*>> parse(Array<Token> tokens) {
 
 //---Linearizer
 internal bool linearize_function(LinearizerContext* linearizer, SyntaxNodeFunction* function);
-internal bool linearize_scoped_statements(LinearizerContext* linearizer, ScopedStatements* scoped_statements, ScopedStatements* outer_scope);
-
-internal void push_syntax_node(SyntaxNode* syntax_node, ScopedStatements* scope) {
-	push(&scope->syntax_nodes, syntax_node, &heap_stack);
-}
+internal bool linearize_scoped_statements(LinearizerContext* linearizer, ScopedStatements* scoped_statements, Array<ControlFlowNode*>* control_flow_nodes_output);
+internal bool linearize_inner_scoped_statements(LinearizerContext* linearizer, ScopedStatements* scoped_statements, ScopedStatements* outer_scope, Array<ControlFlowNode*>* control_flow_nodes_output);
 
 internal void print_statement_does_nothing_warning(SyntaxNode* statement) {
 	auto restore_point = create_restore_point(&heap_stack);
@@ -1520,35 +1561,28 @@ internal void create_linearized_type(LinearizerContext* linearizer, SyntaxNode* 
 	push(&linearizer->linearized_types, linearized_type, &heap_stack);
 }
 
-internal bool linearize_syntax_node(LinearizerContext* linearizer, SyntaxNode* syntax_node, ScopedStatements* scope, bool is_statement = false) {
+#define push_dependency_order_syntax_node(syntax_node) push(dependency_order_syntax_nodes, (syntax_node), &heap_stack)
+
+internal bool linearize_syntax_node(LinearizerContext* linearizer, SyntaxNode* syntax_node, ScopedStatements* scope, Array<SyntaxNode*>* dependency_order_syntax_nodes, bool is_statement = false) {
 	switch (syntax_node->kind) {
 		case SyntaxNodeKind::BinaryMathOperation: {
 			auto binary_math_operation = (SyntaxNodeBinaryMathOperation*)syntax_node;
-			if (!(linearize_syntax_node(linearizer, binary_math_operation->operands[0], scope)
-				  && linearize_syntax_node(linearizer, binary_math_operation->operands[1], scope))) {
+			if (!(linearize_syntax_node(linearizer, binary_math_operation->operands[0], scope, dependency_order_syntax_nodes)
+				  && linearize_syntax_node(linearizer, binary_math_operation->operands[1], scope, dependency_order_syntax_nodes))) {
 				return false;
 			}
 			
-			push_syntax_node(binary_math_operation, scope);
+			push(dependency_order_syntax_nodes, binary_math_operation, &heap_stack);
 		} break;
 		
 		case SyntaxNodeKind::Assignment: {
 			auto assignment = (SyntaxNodeAssignment*)syntax_node;
-			if (!(linearize_syntax_node(linearizer, assignment->destination_expression, scope)
-				  && linearize_syntax_node(linearizer, assignment->source_expression, scope))) {
+			if (!(linearize_syntax_node(linearizer, assignment->destination_expression, scope, dependency_order_syntax_nodes)
+				  && linearize_syntax_node(linearizer, assignment->source_expression, scope, dependency_order_syntax_nodes))) {
 				return false;
 			}
 			
-			push_syntax_node(assignment, scope);
-		} break;
-		
-		case SyntaxNodeKind::Return: {
-			auto return_node = (SyntaxNodeReturn*)syntax_node;
-			if (!linearize_syntax_node(linearizer, return_node->return_expression, scope)) {
-				return false;
-			}
-			
-			push_syntax_node(return_node, scope);
+			push(dependency_order_syntax_nodes, assignment, &heap_stack);
 		} break;
 		
 		case SyntaxNodeKind::Declaration: {
@@ -1575,17 +1609,17 @@ internal bool linearize_syntax_node(LinearizerContext* linearizer, SyntaxNode* s
 			push(&scope->declarations, new_value, &heap_stack);
 			declaration->result = new_value;
 			
-			push_syntax_node(declaration, scope);
+			push(dependency_order_syntax_nodes, declaration, &heap_stack);
 		} break;
 		
 		case SyntaxNodeKind::ArrayAccess: {
 			auto array_access = (SyntaxNodeArrayAccess*)syntax_node;
-			if (!(linearize_syntax_node(linearizer, array_access->array_expression, scope)
-				  && linearize_syntax_node(linearizer, array_access->index_expression, scope))) {
+			if (!(linearize_syntax_node(linearizer, array_access->array_expression, scope, dependency_order_syntax_nodes)
+				  && linearize_syntax_node(linearizer, array_access->index_expression, scope, dependency_order_syntax_nodes))) {
 				return false;
 			}
 			
-			push_syntax_node(array_access, scope);
+			push(dependency_order_syntax_nodes, array_access, &heap_stack);
 		} break;
 		
 		case SyntaxNodeKind::Identifier:
@@ -1595,7 +1629,7 @@ internal bool linearize_syntax_node(LinearizerContext* linearizer, SyntaxNode* s
 				print_statement_does_nothing_warning(syntax_node);
 			}
 			
-			push_syntax_node(syntax_node, scope);
+			push(dependency_order_syntax_nodes, syntax_node, &heap_stack);
 		} break;
 		
 		case SyntaxNodeKind::Function: {
@@ -1605,17 +1639,8 @@ internal bool linearize_syntax_node(LinearizerContext* linearizer, SyntaxNode* s
 			}
 		} break;
 		
-		case SyntaxNodeKind::IfElse: {
-			auto if_else = (SyntaxNodeIfElse*)syntax_node;
-			if (!linearize_syntax_node(linearizer, if_else->condition_expression, scope)
-				&& linearize_scoped_statements(linearizer, &if_else->if_body, scope)
-				&& linearize_scoped_statements(linearizer, &if_else->else_body, scope)) {
-				return false;
-			}
-			
-			push_syntax_node(syntax_node, scope);
-		} break;
-		
+		case SyntaxNodeKind::Return: //Handled in linearize_scoped_statements
+		case SyntaxNodeKind::IfElse: //Handled in linearize_scoped_statements
 		case SyntaxNodeKind::AtomicType:
 		default: {
 			fox_unreachable;
@@ -1625,17 +1650,76 @@ internal bool linearize_syntax_node(LinearizerContext* linearizer, SyntaxNode* s
 	return true;
 }
 
-internal bool linearize_scoped_statements(LinearizerContext* linearizer, ScopedStatements* scoped_statements, ScopedStatements* outer_scope) {
-	scoped_statements->outer_scope = outer_scope;
-	scoped_statements->containing_function = outer_scope->containing_function;
+internal bool linearize_scoped_statements(LinearizerContext* linearizer, ScopedStatements* scoped_statements, Array<ControlFlowNode*>* control_flow_nodes_output) {
+	ControlFlowNode* current_control_flow_node = nullptr;
+	Array<SyntaxNode*>* dependency_order_syntax_nodes = nullptr;
 	
 	fox_for (statement_index, scoped_statements->statements.length) {
-		if (!linearize_syntax_node(linearizer, scoped_statements->statements[statement_index], scoped_statements, true)) {
-			return false;
+		auto statement = scoped_statements->statements[statement_index];
+		
+		switch (statement->kind) {
+			case SyntaxNodeKind::IfElse: {
+				if (current_control_flow_node) {
+					push(control_flow_nodes_output, current_control_flow_node, &heap_stack);
+					current_control_flow_node = nullptr;
+				}
+				
+				auto if_else_control_flow = create_control_flow_node(IfElse);
+				auto if_else_syntax_node = (SyntaxNodeIfElse*)statement;
+				
+				if (!(linearize_syntax_node(linearizer, if_else_syntax_node->condition_expression, scoped_statements, &if_else_control_flow->condition_syntax_nodes)
+					  && linearize_inner_scoped_statements(linearizer, &if_else_syntax_node->if_body, scoped_statements, &if_else_control_flow->if_control_flow_nodes)
+					  && linearize_inner_scoped_statements(linearizer, &if_else_syntax_node->else_body, scoped_statements, &if_else_control_flow->else_control_flow_nodes))) {
+					return false;
+				}
+			} break;
+			
+			case SyntaxNodeKind::Return: {
+				if (current_control_flow_node == nullptr) {
+					auto unconditional_control_flow_node = create_control_flow_node(Unconditional);
+					current_control_flow_node = unconditional_control_flow_node;
+					dependency_order_syntax_nodes = &unconditional_control_flow_node->syntax_nodes;
+				}
+				
+				auto return_node = (SyntaxNodeReturn*)statement;
+				if (!linearize_syntax_node(linearizer, return_node->return_expression, scoped_statements, dependency_order_syntax_nodes)) {
+					return false;
+				}
+				
+				push(dependency_order_syntax_nodes, return_node, &heap_stack);
+				
+				//terminate this node
+				current_control_flow_node->definitely_returns = true;
+				push(control_flow_nodes_output, current_control_flow_node, &heap_stack);
+				current_control_flow_node = nullptr;
+			} break;
+			
+			default: {
+				if (current_control_flow_node == nullptr) {
+					auto unconditional_control_flow_node = create_control_flow_node(Unconditional);
+					current_control_flow_node = unconditional_control_flow_node;
+					dependency_order_syntax_nodes = &unconditional_control_flow_node->syntax_nodes;
+				}
+				
+				if (!linearize_syntax_node(linearizer, statement, scoped_statements, dependency_order_syntax_nodes)) {
+					return false;
+				}
+			} break;
 		}
 	}
 	
+	if (current_control_flow_node) {
+		push(control_flow_nodes_output, current_control_flow_node, &heap_stack);
+	}
+	
 	return true;
+}
+
+internal bool linearize_inner_scoped_statements(LinearizerContext* linearizer, ScopedStatements* scoped_statements, ScopedStatements* outer_scope, Array<ControlFlowNode*>* control_flow_nodes_output) {
+	scoped_statements->containing_function = outer_scope->containing_function;
+	scoped_statements->outer_scope = outer_scope;
+	
+	return linearize_scoped_statements(linearizer, scoped_statements, control_flow_nodes_output);
 }
 
 internal bool linearize_function(LinearizerContext* linearizer, SyntaxNodeFunction* function) {
@@ -1659,13 +1743,7 @@ internal bool linearize_function(LinearizerContext* linearizer, SyntaxNodeFuncti
 		create_linearized_type(linearizer, function->return_type_nodes[return_type_index], &function->return_types[return_type_index]);
 	}
 	
-	fox_for (statement_index, function->body.statements.length) {
-		if (!linearize_syntax_node(linearizer, function->body.statements[statement_index], &function->body, true)) {
-			return false;
-		}
-	}
-	
-	return true;
+	return linearize_scoped_statements(linearizer, &function->body, &function->control_flow_nodes);
 }
 
 internal bool linearize(LinearizerContext* linearizer, Array<SyntaxNode*> statements) {
@@ -1681,18 +1759,59 @@ internal bool linearize(LinearizerContext* linearizer, Array<SyntaxNode*> statem
 }
 
 template<typename AllocatorType>
+internal void write(String* buffer, ControlFlowNode* control_flow_node, fuint indent, AllocatorType* allocator);
+
+template<typename AllocatorType>
+internal void write(String* buffer, Array<ControlFlowNode*> control_flow_nodes, fuint indent, AllocatorType* allocator) {
+	fox_for (control_flow_node_index, control_flow_nodes.length) {
+		write(buffer, control_flow_nodes[control_flow_node_index], indent, allocator);
+	}
+}
+
+template<typename ArrayType, typename AllocatorType>
+internal void write_control_flow_block(String* buffer, ConstString block_name, ArrayType control_flow_nodes_or_syntax_nodes, fuint indent, AllocatorType* allocator) {
+	write_indent(buffer, indent, allocator);
+	write(buffer, block_name, allocator);
+	write(buffer, " {\n", allocator);
+	write(buffer, control_flow_nodes_or_syntax_nodes, indent + 1, allocator);
+	write_indent(buffer, indent, allocator);
+	write(buffer, "}\n", allocator);
+}
+
+template<typename AllocatorType>
+internal void write(String* buffer, ControlFlowNode* control_flow_node, fuint indent, AllocatorType* allocator) {
+	switch (control_flow_node->kind) {
+		case ControlFlowNodeKind::Unconditional: {
+			auto unconditional_control_flow_node = (ControlFlowNodeUnconditional*)control_flow_node;
+			write_control_flow_block(buffer, "Unconditional", unconditional_control_flow_node->syntax_nodes, indent, allocator);
+		} break;
+		
+		case ControlFlowNodeKind::IfElse: {
+			auto if_else_control_flow_node = (ControlFlowNodeIfElse*)control_flow_node;
+			write_control_flow_block(buffer, "IfElse Condition", if_else_control_flow_node->condition_syntax_nodes, indent, allocator);
+			write_control_flow_block(buffer, "IfElse If", if_else_control_flow_node->if_control_flow_nodes, indent, allocator);
+			write_control_flow_block(buffer, "IfElse Else", if_else_control_flow_node->else_control_flow_nodes, indent, allocator);
+		} break;
+		
+		default: {
+			fox_unreachable;
+		} break;
+	}
+}
+
+template<typename AllocatorType>
 internal void write(String* buffer, LinearizerContext* linearizer, AllocatorType* allocator) {
 	fox_for (function_index, linearizer->functions.length) {
 		auto function = linearizer->functions[function_index];
 		write_function_opening(buffer, function, allocator);
-		write(buffer, function->body.syntax_nodes, 1, allocator);
+		fox_for (control_flow_node_index, function->control_flow_nodes.length) {
+			write(buffer, function->control_flow_nodes[control_flow_node_index], 1, allocator);
+		}
 		write(buffer, "}\n\n", allocator);
 	}
 }
 
 //---Validater
-internal bool validate_scoped_statements_semantics(ScopedStatements* scoped_statements);
-
 internal bool validate_syntax_node_semantics(SyntaxNode* syntax_node, ScopedStatements* scope) {
 	switch (syntax_node->kind) {
 		case SyntaxNodeKind::BinaryMathOperation: {
@@ -1861,23 +1980,8 @@ internal bool validate_syntax_node_semantics(SyntaxNode* syntax_node, ScopedStat
 			string_node->result = string_value;
 		} break;
 		
-		case SyntaxNodeKind::IfElse: {
-			auto if_else = (SyntaxNodeIfElse*)syntax_node;
-			auto condition_expression = if_else->condition_expression;
-			auto condition_type = condition_expression->result->type;
-			if (condition_type->kind != TypeKind::Atomic) {
-				String error_message;
-				zero(&error_message);
-				write(&error_message, *condition_expression->site, &heap_stack);
-				write(&error_message, "Type error: expected integer type in if condition.\n", &heap_stack);
-				print(error_message);
-				return false;
-			}
-			
-			return validate_scoped_statements_semantics(&if_else->if_body) && validate_scoped_statements_semantics(&if_else->else_body);
-		} break;
-		
 		case SyntaxNodeKind::Function:
+		case SyntaxNodeKind::IfElse: //Handled in validate_scoped_statements_semantics
 		case SyntaxNodeKind::AtomicType:
 		case SyntaxNodeKind::FixedLengthArrayType:
 		default: {
@@ -1888,10 +1992,44 @@ internal bool validate_syntax_node_semantics(SyntaxNode* syntax_node, ScopedStat
 	return true;
 }
 
-internal bool validate_scoped_statements_semantics(ScopedStatements* scoped_statements) {
-	fox_for (syntax_node_index, scoped_statements->syntax_nodes.length) {
-		if (!validate_syntax_node_semantics(scoped_statements->syntax_nodes[syntax_node_index], scoped_statements)) {
-			return false;
+internal bool validate_control_flow_nodes(Array<ControlFlowNode*> control_flow_nodes, ScopedStatements* scope) {
+	fox_for (control_flow_node_index, control_flow_nodes.length) {
+		auto control_flow_node = control_flow_nodes[control_flow_node_index];
+		switch (control_flow_node->kind) {
+			case ControlFlowNodeKind::Unconditional: {
+				auto uncondition_control_flow_node = (ControlFlowNodeUnconditional*)control_flow_node;
+				fox_for (syntax_node_index, uncondition_control_flow_node->syntax_nodes.length) {
+					if (!validate_syntax_node_semantics(uncondition_control_flow_node->syntax_nodes[syntax_node_index], scope)) {
+						return false;
+					}
+				}
+			} break;
+			
+			case ControlFlowNodeKind::IfElse: {
+				auto if_else_control_flow_node = (ControlFlowNodeIfElse*)control_flow_node;
+				
+				//Validate the node itself
+				auto if_else_syntax_node = if_else_control_flow_node->syntax_node;
+				auto condition_expression = if_else_syntax_node->condition_expression;
+				auto condition_type = condition_expression->result->type;
+				if (condition_type->kind != TypeKind::Atomic) {
+					String error_message;
+					zero(&error_message);
+					write(&error_message, *condition_expression->site, &heap_stack);
+					write(&error_message, "Type error: expected integer type in if condition.\n", &heap_stack);
+					print(error_message);
+					return false;
+				}
+				
+				if (!(validate_control_flow_nodes(if_else_control_flow_node->if_control_flow_nodes, &if_else_syntax_node->if_body)
+					  && validate_control_flow_nodes(if_else_control_flow_node->else_control_flow_nodes, &if_else_syntax_node->else_body))) {
+					return false;
+				}
+			} break;
+			
+			default: {
+				fox_unreachable;
+			} break;
 		}
 	}
 	
@@ -1899,7 +2037,7 @@ internal bool validate_scoped_statements_semantics(ScopedStatements* scoped_stat
 }
 
 internal bool validate_function_semantics(SyntaxNodeFunction* function) {
-	if (!validate_scoped_statements_semantics(&function->body)) {
+	if (!validate_control_flow_nodes(function->control_flow_nodes, &function->body)) {
 		return false;
 	}
 	
