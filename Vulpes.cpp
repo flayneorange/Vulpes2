@@ -2,7 +2,7 @@
 #define enable_lexer_print 1
 #define enable_parser_print 1
 #define enable_linearizer_print 1
-#define enable_c_backend_print 1
+#define enable_c_backend_print 0
 
 //---Includes
 #include "foxlib_platform.hpp"
@@ -112,6 +112,8 @@ enum class Keyword {
 	subtract,
 	declare,
 	function,
+	if_keyword,
+	else_keyword,
 	return_keyword,
 	integer_u8,
 	integer_u16,
@@ -141,6 +143,8 @@ ConstString keyword_strings[] = {
 	"-",
 	":",
 	"function",
+	"if",
+	"else",
 	"return",
 	"u8",
 	"u16",
@@ -169,6 +173,8 @@ u64 precedences[] = {
 	200, // -
 	150, // :
 	0,   // function
+	0,   // if
+	0,   // else
 	0,   // return
 	0,   // u8
 	0,   // u16
@@ -739,6 +745,7 @@ enum class SyntaxNodeKind : u8 {
 	Declaration,
 	ArrayAccess,
 	Function,
+	IfElse,
 	IntegerLiteral,
 	StringLiteral,
 	AtomicType,
@@ -783,9 +790,18 @@ struct SyntaxNodeArrayAccess : SyntaxNode {
 	SyntaxNode* index_expression;
 };
 
+struct ScopedStatements {
+	SyntaxNodeFunction* containing_function;
+	ScopedStatements* outer_scope;
+	
+	Array<SyntaxNode*> statements;
+	Array<SyntaxNode*> syntax_nodes;
+	Array<Value*> declarations;
+};
+
 struct SyntaxNodeFunction : SyntaxNode {
 	struct Argument {
-		SourceSite* site; //site of argument name
+		SourceSite* site; //@rename declaration_site
 		ConstString identifier;
 		SyntaxNode* type_node;
 		Value* value;
@@ -795,9 +811,14 @@ struct SyntaxNodeFunction : SyntaxNode {
 	Array<Argument> arguments;
 	Array<SyntaxNode*> return_type_nodes;
 	Array<Type*> return_types;
-	Array<SyntaxNode*> body;
-	Array<SyntaxNode*> linear_syntax_nodes;
-	Array<Value*> declarations;
+	
+	ScopedStatements body;
+};
+
+struct SyntaxNodeIfElse : SyntaxNode {
+	SyntaxNode* condition_expression;
+	ScopedStatements if_body;
+	ScopedStatements else_body;
 };
 
 struct SyntaxNodeIntegerLiteral : SyntaxNode {
@@ -822,15 +843,8 @@ struct ParseContext {
 	Token* tokens_end;
 };
 
-internal Optional<Array<SyntaxNode*>> parse(Array<Token> tokens);
-internal Optional<Array<SyntaxNode*>> parse_statements(ParseContext* parser, bool inside_function = true);
-internal SyntaxNodeFunction* parse_function(ParseContext* parser);
-internal SyntaxNode* parse_expression(ParseContext* parser, u64 outer_precedence = 0);
-
 template<typename AllocatorType> internal void write(String* buffer, Array<SyntaxNode*> syntax_nodes, fuint indent, AllocatorType* allocator);
-template<typename AllocatorType> internal void write(String* buffer, SyntaxNode* syntax_node, fuint indent, AllocatorType* allocator);
 template<typename AllocatorType> internal void write_function_opening(String* buffer, SyntaxNodeFunction* function, AllocatorType* allocator);
-template<typename SyntaxNodeType> internal SyntaxNodeType* create_syntax_node_internal(SyntaxNodeKind kind, SourceSite* site);
 
 template<typename SyntaxNodeType>
 internal SyntaxNodeType* create_syntax_node_internal(SyntaxNodeKind kind, SourceSite* site) {
@@ -840,15 +854,6 @@ internal SyntaxNodeType* create_syntax_node_internal(SyntaxNodeKind kind, Source
 	return syntax_node;
 }
 #define create_syntax_node(type, site) create_syntax_node_internal<SyntaxNode##type>(SyntaxNodeKind::##type, site)
-
-template<typename AllocatorType>
-internal void write(String* buffer, Array<SyntaxNode*> syntax_nodes, fuint indent, AllocatorType* allocator) {
-	fox_for (syntax_node_index, syntax_nodes.length) {
-		write_indent(buffer, indent, allocator);
-		write(buffer, syntax_nodes[syntax_node_index], indent, allocator);
-		write(buffer, "\n", allocator);
-	}
-}
 
 template<typename AllocatorType>
 internal void write(String* buffer, SyntaxNode* syntax_node, fuint indent, AllocatorType* allocator) {
@@ -904,7 +909,7 @@ internal void write(String* buffer, SyntaxNode* syntax_node, fuint indent, Alloc
 		case SyntaxNodeKind::Function: {
 			auto function = (SyntaxNodeFunction*)syntax_node;
 			write_function_opening(buffer, function, allocator);
-			write(buffer, function->body, indent + 1, allocator);
+			write(buffer, function->body.statements, indent + 1, allocator);
 			write_indent(buffer, indent, allocator);
 			write(buffer, "}", allocator);
 		} break;
@@ -939,6 +944,15 @@ internal void write(String* buffer, SyntaxNode* syntax_node, fuint indent, Alloc
 		default: {
 			fox_unreachable;
 		} break;
+	}
+}
+
+template<typename AllocatorType>
+internal void write(String* buffer, Array<SyntaxNode*> syntax_nodes, fuint indent, AllocatorType* allocator) {
+	fox_for (syntax_node_index, syntax_nodes.length) {
+		write_indent(buffer, indent, allocator);
+		write(buffer, syntax_nodes[syntax_node_index], indent, allocator);
+		write(buffer, "\n", allocator);
 	}
 }
 
@@ -1018,7 +1032,7 @@ internal bool expect_token_kind_internal(ParseContext* parser, TokenKind kind, C
 	
 	return false;
 }
-#define expect_token_kind(parser, kind, where) if (!expect_token_kind_internal((parser), (kind), (where))) { return nullptr; }
+#define expect_token_kind(kind, where) if (!expect_token_kind_internal(parser, (kind), (where))) { return nullptr; }
 
 internal bool expect_keyword_internal(ParseContext* parser, Keyword keyword, ConstString where) {
 	if (expect_token_kind_internal(parser, TokenKind::keyword, where)) {
@@ -1038,106 +1052,27 @@ internal bool expect_keyword_internal(ParseContext* parser, Keyword keyword, Con
 	
 	return false;
 }
-#define expect_keyword(parser, keyword, where) if (!expect_keyword_internal((parser), (keyword), (where))) { return nullptr; }
+#define expect_keyword(keyword, where) if (!expect_keyword_internal(parser, (keyword), (where))) { return nullptr; }
 
-internal Optional<Array<SyntaxNode*>> parse(Array<Token> tokens) {
-	fox_assert(tokens);
-	
-	ParseContext parser;
-	zero(&parser);
-	parser.cursor = tokens.data;
-	parser.tokens_end = tokens.data + tokens.length;
-	
-	return parse_statements(&parser, false);
-}
-
-internal Optional<Array<SyntaxNode*>> parse_statements(ParseContext* parser, bool inside_function) {
-	Array<SyntaxNode*> statements;
-	zero(&statements);
-	
-	while (parser->cursor < parser->tokens_end) {
-		if (parser->cursor->kind == TokenKind::keyword) {
-			switch (parser->cursor->keyword_value) {
-				case Keyword::function: {
-					auto function = parse_function(parser);
-					if (function) {
-						push(&statements, function, &heap_stack);
-					} else {
-						return nil;
-					}
-				} break;
-				
-				case Keyword::return_keyword: {
-					if (inside_function) {
-						auto return_site = &parser->cursor->site;
-						parser->cursor++;
-						auto return_expression = parse_expression(parser);
-						if (return_expression) {
-							auto return_node = create_syntax_node(Return, return_site);
-							return_node->return_expression = return_expression;
-							push(&statements, return_node, &heap_stack);
-						} else {
-							return nil;
-						}
-					} else {
-						String error_message;
-						zero(&error_message);
-						write(&error_message, parser->cursor->site, &heap_stack);
-						write(&error_message, "Syntax error: return is only allowed inside a function.\n", &heap_stack);
-						print(error_message);
-						return nil;
-					}
-				} break;
-				
-				case Keyword::close_curly: {
-					if (inside_function) {
-						return statements;
-					} else {
-						String error_message;
-						zero(&error_message);
-						write(&error_message, parser->cursor->site, &heap_stack);
-						write(&error_message, "Syntax error: stray close curly brace (}).\n", &heap_stack);
-						print(error_message);
-						return nil;
-					}
-				} break;
-				
-				default: {
-					String error_message;
-					zero(&error_message);
-					write(&error_message, "Syntax error: unexpected keyword at top level ", &heap_stack);
-					write(&error_message, parser->cursor->keyword_value, &heap_stack);
-					write(&error_message, "\n", &heap_stack);
-					print(error_message);
-					return nil;
-				} break;
-			}
-		} else {
-			//@todo allow global declarations
-			if (inside_function) {
-				auto expression = parse_expression(parser);
-				if (expression) {
-					push(&statements, expression, &heap_stack);
-				} else {
-					return nil;
-				}
-			} else {
-				String error_message;
-				zero(&error_message);
-				write(&error_message, parser->cursor->site, &heap_stack);
-				write(&error_message, "Syntax error: expression outside of function.\n", &heap_stack);
-				print(error_message);
-				return nil;
-			}
-		}
+internal bool expect_inside_function_internal(ParseContext* parser, bool inside_function, ConstString expect_what) {
+	if (!inside_function) {
+		String error_message;
+		zero(&error_message);
+		write(&error_message, parser->cursor->site, &heap_stack);
+		write(&error_message, "Syntax error: ", &heap_stack);
+		write(&error_message, expect_what, &heap_stack);
+		write(&error_message, " is only allowed inside a function.\n", &heap_stack);
+		print(error_message);
 	}
-	
-	return statements;
+	return inside_function;
 }
+#define expect_inside_function(where) if (!expect_inside_function_internal(parser, inside_function, (where))) { return nil; }
+
+internal Optional<Array<SyntaxNode*>> parse_statements(ParseContext* parser, bool inside_function = true);
 
 internal SyntaxNode* parse_type(ParseContext* parser) {
 	//@todo better error message
-	expect_token_kind(parser, TokenKind::keyword, "in type-y place, expected type.\n");
+	expect_token_kind(TokenKind::keyword, "in type-y place, expected type.\n");
 	
 	if (is_integer_type_keyword(parser->cursor->keyword_value)) {
 		auto integer_keyword = parser->cursor->keyword_value;
@@ -1155,10 +1090,10 @@ internal SyntaxNode* parse_type(ParseContext* parser) {
 		auto array_type_site = &parser->cursor->site;
 		parser->cursor++;
 		
-		expect_token_kind(parser, TokenKind::integer, "in type declaration, expected integer literal length of array.\n");
+		expect_token_kind(TokenKind::integer, "in type declaration, expected integer literal length of array.\n");
 		u64 array_length = parser->cursor->integer_value;
 		parser->cursor++;
-		expect_keyword(parser, Keyword::close_square, "in type declaration, expected close ].\n");
+		expect_keyword(Keyword::close_square, "in type declaration, expected close ].\n");
 		auto element_type_node = parse_type(parser);
 		
 		auto array_type_node = create_syntax_node(FixedLengthArrayType, array_type_site);
@@ -1175,100 +1110,7 @@ internal SyntaxNode* parse_type(ParseContext* parser) {
 	return nullptr;
 }
 
-internal SyntaxNodeFunction* parse_function(ParseContext* parser) {
-	//function name(argument1: int, argument2: int,): int {}
-	//function name() {}
-	fox_assert(parser->cursor->kind == TokenKind::keyword && parser->cursor->keyword_value == Keyword::function);
-	auto function_site = &parser->cursor->site;
-	parser->cursor++;
-	
-	expect_token_kind(parser, TokenKind::identifier, "in function declaration, expected function name.\n");
-	auto function_identifier = parser->cursor->identifier_value;
-	parser->cursor++;
-	
-	expect_keyword(parser, Keyword::open_parenthesis, "in function declaration, expected open parenthesis.\n");
-	
-	//Parse arguments
-	Array<SyntaxNodeFunction::Argument> arguments;
-	zero(&arguments);
-	while (true) {
-		if (parser->cursor >= parser->tokens_end) {
-			print_unexpected_end_of_file(parser->cursor[-1].site, "in function declaration, expected close parenthesis or next argument.\n");
-			return nullptr;
-		}
-		
-		if (parser->cursor->kind == TokenKind::keyword) {
-			expect_keyword(parser, Keyword::close_parenthesis, "in function declaration, expected close parenthesis or next argument.\n");
-			break;
-		}
-		
-		expect_token_kind(parser, TokenKind::identifier, "in function declaration, expected name of argument.\n");
-		auto argument_site = &parser->cursor->site;
-		auto argument_identifier = parser->cursor->identifier_value;
-		parser->cursor++;
-		expect_keyword(parser, Keyword::declare, "in function declaration, expected type of argumnet.\n");
-		auto argument_type = parse_type(parser);
-		
-		auto new_argument = push_zero(&arguments, &heap_stack);
-		new_argument->site = argument_site;
-		new_argument->identifier = argument_identifier;
-		new_argument->type_node = argument_type;
-		
-		expect_token_kind(parser, TokenKind::keyword, "in function declaration, expected close parenthesis or next argument.\n");
-		if (!(parser->cursor->keyword_value == Keyword::comma || parser->cursor->keyword_value == Keyword::close_parenthesis)) {
-			String error_message;
-			zero(&error_message);
-			write(&error_message, "Syntax error: expected comma or close parenthesis but got ", &heap_stack);
-			write(&error_message, *parser->cursor, &heap_stack);
-			write(&error_message, "\n", &heap_stack);
-			print(error_message);
-			return nullptr;
-		}
-		
-		if (parser->cursor->keyword_value == Keyword::comma) {
-			parser->cursor++;
-		}
-	}
-	
-	expect_token_kind(parser, TokenKind::keyword, "in function declaration, expected return value or function body.\n");
-	
-	Array<SyntaxNode*> return_type_nodes;
-	zero(&return_type_nodes);
-	if (parser->cursor->keyword_value == Keyword::declare) {
-		parser->cursor++;
-		
-		//@todo we should probably support terminating comma here too
-		while (true) {
-			auto return_type = parse_type(parser);
-			push(&return_type_nodes, return_type, &heap_stack);
-			
-			expect_token_kind(parser, TokenKind::keyword, "in function declaration, expected next return value or function body.\n");
-			if (parser->cursor->keyword_value == Keyword::open_curly) {
-				break;
-			}
-			expect_keyword(parser, Keyword::comma, "in function declaration, expected next return value or function body.\n");
-			parser->cursor++;
-		}
-	}
-	
-	//@todo clean this up a bit, function x() , int {} will tell us we expected function body at comma
-	expect_keyword(parser, Keyword::open_curly, "in function declaration, expected function body.\n");
-	auto function_body = parse_statements(parser);
-	if (function_body) {
-		expect_keyword(parser, Keyword::close_curly, "in function declaration, expected end of function body.\n");
-		
-		auto function = create_syntax_node(Function, function_site);
-		function->identifier = function_identifier;
-		function->arguments = arguments;
-		function->return_type_nodes = return_type_nodes;
-		function->body = function_body.value;
-		return function;
-	}
-	
-	return nullptr;
-}
-
-internal SyntaxNode* parse_expression(ParseContext* parser, u64 outer_precedence) {
+internal SyntaxNode* parse_expression(ParseContext* parser, u64 outer_precedence = 0) {
 	fox_assert(parser->cursor < parser->tokens_end);
 	
 	SyntaxNode* left = nullptr;
@@ -1336,8 +1178,8 @@ internal SyntaxNode* parse_expression(ParseContext* parser, u64 outer_precedence
 		   && parser->cursor->keyword_value == Keyword::open_square) {
 		auto array_access_site = &parser->cursor->site;
 		parser->cursor++;
-		auto index_expression = parse_expression(parser, 0);
-		expect_keyword(parser, Keyword::close_square, "in array access, expected close square ].\n");
+		auto index_expression = parse_expression(parser);
+		expect_keyword(Keyword::close_square, "in array access, expected close square ].\n");
 		
 		auto array_access = create_syntax_node(ArrayAccess, array_access_site);
 		array_access->array_expression = left;
@@ -1391,22 +1233,265 @@ internal SyntaxNode* parse_expression(ParseContext* parser, u64 outer_precedence
 	return left;
 }
 
-//---Linearizer
-internal bool linearize_function(LinearizerContext* linearizer, SyntaxNodeFunction* function);
-internal bool linearize_syntax_node(LinearizerContext* linearizer, SyntaxNode* node, SyntaxNodeFunction* containing_function, bool is_statement = false);
-internal void push_syntax_node(SyntaxNode* node, SyntaxNodeFunction* containing_function);
-internal void print_statement_does_nothing_warning(SyntaxNode* statement);
-
-internal bool linearize(LinearizerContext* linearizer, Array<SyntaxNode*> statements) {
-	fox_for (statement_index, statements.length) {
-		auto statement = (SyntaxNodeFunction*)statements[statement_index];
-		fox_assert(statement->kind == SyntaxNodeKind::Function);
-		if (!linearize_function(linearizer, statement)) {
-			return false;
+internal SyntaxNodeIfElse* parse_if_else(ParseContext* parser) {
+	fox_assert(parser->cursor < parser->tokens_end
+			   && parser->cursor->kind == TokenKind::keyword
+			   && parser->cursor->keyword_value == Keyword::if_keyword);
+	auto if_site = &parser->cursor->site;
+	parser->cursor++;
+	
+	auto condition_expression = parse_expression(parser);
+	expect_keyword(Keyword::open_curly, "in if statement, expected if body.\n");
+	auto if_body = parse_statements(parser, true);
+	if (!if_body) {
+		return nullptr;
+	}
+	expect_keyword(Keyword::close_curly, "in if statement body.\n");
+	
+	//Check for else
+	Array<SyntaxNode*> else_body;
+	zero(&else_body);
+	if (parser->cursor < parser->tokens_end
+		&& parser->cursor->kind == TokenKind::keyword
+		&& parser->cursor->keyword_value == Keyword::else_keyword) {
+		parser->cursor++;
+		if (parser->cursor >= parser->tokens_end) {
+			print_unexpected_end_of_file(parser->cursor[-1].site, "in else statement body.\n");
+		}
+		
+		if (parser->cursor->kind == TokenKind::keyword
+			&& parser->cursor->keyword_value == Keyword::if_keyword) {
+			auto if_else_for_else = parse_if_else(parser);
+			if (if_else_for_else) {
+				push(&else_body, if_else_for_else, &heap_stack);
+			} else {
+				return nullptr;
+			}
+		} else {
+			expect_keyword(Keyword::open_curly, "in else statement body.\n");
+			auto maybe_else_body = parse_statements(parser, true);
+			if (!maybe_else_body) {
+				return nullptr;
+			}
+			else_body = maybe_else_body.value;
+			expect_keyword(Keyword::close_curly, "in else statement body.\n");
 		}
 	}
 	
-	return true;
+	auto if_else = create_syntax_node(IfElse, if_site);
+	if_else->condition_expression = condition_expression;
+	if_else->if_body.statements = if_body.value;
+	if_else->else_body.statements = else_body;
+	return if_else;
+}
+
+internal SyntaxNodeFunction* parse_function(ParseContext* parser) {
+	//function name(argument1: int, argument2: int,): int {}
+	//function name() {}
+	fox_assert(parser->cursor->kind == TokenKind::keyword && parser->cursor->keyword_value == Keyword::function);
+	auto function_site = &parser->cursor->site;
+	parser->cursor++;
+	
+	expect_token_kind(TokenKind::identifier, "in function declaration, expected function name.\n");
+	auto function_identifier = parser->cursor->identifier_value;
+	parser->cursor++;
+	
+	expect_keyword(Keyword::open_parenthesis, "in function declaration, expected open parenthesis.\n");
+	
+	//Parse arguments
+	Array<SyntaxNodeFunction::Argument> arguments;
+	zero(&arguments);
+	while (true) {
+		if (parser->cursor >= parser->tokens_end) {
+			print_unexpected_end_of_file(parser->cursor[-1].site, "in function declaration, expected close parenthesis or next argument.\n");
+			return nullptr;
+		}
+		
+		if (parser->cursor->kind == TokenKind::keyword) {
+			expect_keyword(Keyword::close_parenthesis, "in function declaration, expected close parenthesis or next argument.\n");
+			break;
+		}
+		
+		expect_token_kind(TokenKind::identifier, "in function declaration, expected name of argument.\n");
+		auto argument_identifier = parser->cursor->identifier_value;
+		parser->cursor++;
+		auto argument_site = &parser->cursor->site;
+		expect_keyword(Keyword::declare, "in function declaration, expected type of argumnet.\n");
+		auto argument_type = parse_type(parser);
+		
+		auto new_argument = push_zero(&arguments, &heap_stack);
+		new_argument->site = argument_site;
+		new_argument->identifier = argument_identifier;
+		new_argument->type_node = argument_type;
+		
+		expect_token_kind(TokenKind::keyword, "in function declaration, expected close parenthesis or next argument.\n");
+		if (!(parser->cursor->keyword_value == Keyword::comma || parser->cursor->keyword_value == Keyword::close_parenthesis)) {
+			String error_message;
+			zero(&error_message);
+			write(&error_message, "Syntax error: expected comma or close parenthesis but got ", &heap_stack);
+			write(&error_message, *parser->cursor, &heap_stack);
+			write(&error_message, "\n", &heap_stack);
+			print(error_message);
+			return nullptr;
+		}
+		
+		if (parser->cursor->keyword_value == Keyword::comma) {
+			parser->cursor++;
+		}
+	}
+	
+	expect_token_kind(TokenKind::keyword, "in function declaration, expected return value or function body.\n");
+	
+	Array<SyntaxNode*> return_type_nodes;
+	zero(&return_type_nodes);
+	if (parser->cursor->keyword_value == Keyword::declare) {
+		parser->cursor++;
+		
+		//@todo we should probably support terminating comma here too
+		while (true) {
+			auto return_type = parse_type(parser);
+			push(&return_type_nodes, return_type, &heap_stack);
+			
+			expect_token_kind(TokenKind::keyword, "in function declaration, expected next return value or function body.\n");
+			if (parser->cursor->keyword_value == Keyword::open_curly) {
+				break;
+			}
+			expect_keyword(Keyword::comma, "in function declaration, expected next return value or function body.\n");
+			parser->cursor++;
+		}
+	}
+	
+	//@todo clean this up a bit, function x() , int {} will tell us we expected function body at comma
+	expect_keyword(Keyword::open_curly, "in function declaration, expected function body.\n");
+	auto function_body = parse_statements(parser);
+	if (function_body) {
+		expect_keyword(Keyword::close_curly, "in function declaration, expected end of function body.\n");
+		
+		auto function = create_syntax_node(Function, function_site);
+		function->identifier = function_identifier;
+		function->arguments = arguments;
+		function->return_type_nodes = return_type_nodes;
+		function->body.statements = function_body.value;
+		return function;
+	}
+	
+	return nullptr;
+}
+
+internal Optional<Array<SyntaxNode*>> parse_statements(ParseContext* parser, bool inside_function) {
+	Array<SyntaxNode*> statements;
+	zero(&statements);
+	
+	while (parser->cursor < parser->tokens_end) {
+		if (parser->cursor->kind == TokenKind::keyword) {
+			switch (parser->cursor->keyword_value) {
+				case Keyword::function: {
+					auto function = parse_function(parser);
+					if (function) {
+						push(&statements, function, &heap_stack);
+					} else {
+						return nil;
+					}
+				} break;
+				
+				case Keyword::if_keyword: {
+					expect_inside_function("if statement");
+					auto if_else = parse_if_else(parser);
+					if (if_else) {
+						push(&statements, if_else, &heap_stack);
+					} else {
+						return nil;
+					}
+				} break;
+				
+				case Keyword::return_keyword: {
+					expect_inside_function("return");
+					auto return_site = &parser->cursor->site;
+					parser->cursor++;
+					auto return_expression = parse_expression(parser);
+					if (return_expression) {
+						auto return_node = create_syntax_node(Return, return_site);
+						return_node->return_expression = return_expression;
+						push(&statements, return_node, &heap_stack);
+					} else {
+						return nil;
+					}
+				} break;
+				
+				case Keyword::close_curly: {
+					if (inside_function) {
+						return statements;
+					} else {
+						String error_message;
+						zero(&error_message);
+						write(&error_message, parser->cursor->site, &heap_stack);
+						write(&error_message, "Syntax error: stray close curly brace (}).\n", &heap_stack);
+						print(error_message);
+						return nil;
+					}
+				} break;
+				
+				//@todo specific message for else
+				default: {
+					String error_message;
+					zero(&error_message);
+					write(&error_message, "Syntax error: unexpected keyword at top level ", &heap_stack);
+					write(&error_message, parser->cursor->keyword_value, &heap_stack);
+					write(&error_message, "\n", &heap_stack);
+					print(error_message);
+					return nil;
+				} break;
+			}
+		} else {
+			//@todo allow global declarations
+			if (inside_function) {
+				auto expression = parse_expression(parser);
+				if (expression) {
+					push(&statements, expression, &heap_stack);
+				} else {
+					return nil;
+				}
+			} else {
+				String error_message;
+				zero(&error_message);
+				write(&error_message, parser->cursor->site, &heap_stack);
+				write(&error_message, "Syntax error: expression outside of function.\n", &heap_stack);
+				print(error_message);
+				return nil;
+			}
+		}
+	}
+	
+	return statements;
+}
+
+internal Optional<Array<SyntaxNode*>> parse(Array<Token> tokens) {
+	fox_assert(tokens);
+	
+	ParseContext parser;
+	zero(&parser);
+	parser.cursor = tokens.data;
+	parser.tokens_end = tokens.data + tokens.length;
+	
+	return parse_statements(&parser, false);
+}
+
+//---Linearizer
+internal bool linearize_function(LinearizerContext* linearizer, SyntaxNodeFunction* function);
+internal bool linearize_scoped_statements(LinearizerContext* linearizer, ScopedStatements* scoped_statements, ScopedStatements* outer_scope);
+
+internal void push_syntax_node(SyntaxNode* syntax_node, ScopedStatements* scope) {
+	push(&scope->syntax_nodes, syntax_node, &heap_stack);
+}
+
+internal void print_statement_does_nothing_warning(SyntaxNode* statement) {
+	auto restore_point = create_restore_point(&heap_stack);
+	String error_message;
+	zero(&error_message);
+	write(&error_message, *statement->site, &heap_stack);
+	write(&error_message, "Warning: statement does nothing.\n", &heap_stack);
+	print(error_message);
+	restore(&heap_stack, restore_point);
 }
 
 internal void linearize_type(LinearizerContext* linearizer, LinearizedType* linearized_type, SyntaxNode* type_node) {
@@ -1427,7 +1512,7 @@ internal void linearize_type(LinearizerContext* linearizer, LinearizedType* line
 	}
 }
 
-//@rename result_consumer or maybe LinearizedType::result
+//@rename result_consumer? or linearized_type->result?
 internal void create_linearized_type(LinearizerContext* linearizer, SyntaxNode* type_node, Type** result_consumer) {
 	auto linearized_type = allocate<LinearizedType>(&heap_stack);
 	linearized_type->result = result_consumer;
@@ -1435,71 +1520,43 @@ internal void create_linearized_type(LinearizerContext* linearizer, SyntaxNode* 
 	push(&linearizer->linearized_types, linearized_type, &heap_stack);
 }
 
-internal bool linearize_function(LinearizerContext* linearizer, SyntaxNodeFunction* function) {
-	push(&linearizer->functions, function, &heap_stack);
-	
-	fox_for (argument_index, function->arguments.length) {
-		auto argument = &function->arguments[argument_index];
-		auto argument_value = allocate<Value>(&heap_stack);
-		argument_value->identifier = argument->identifier;
-		create_linearized_type(linearizer, argument->type_node, &argument_value->type);
-		argument_value->declaration_site = argument->site;
-		argument_value->is_argument = true;
-		argument->value = argument_value;
-		push(&function->declarations, argument_value, &heap_stack);
-	}
-	
-	function->return_types = allocate_array<Type*>(function->return_type_nodes, &heap_stack);
-	fox_for (return_type_index, function->return_types.length) {
-		create_linearized_type(linearizer, function->return_type_nodes[return_type_index], &function->return_types[return_type_index]);
-	}
-	
-	fox_for (statement_index, function->body.length) {
-		if (!linearize_syntax_node(linearizer, function->body[statement_index], function, true)) {
-			return false;
-		}
-	}
-	
-	return true;
-}
-
-internal bool linearize_syntax_node(LinearizerContext* linearizer, SyntaxNode* syntax_node, SyntaxNodeFunction* containing_function, bool is_statement) {
+internal bool linearize_syntax_node(LinearizerContext* linearizer, SyntaxNode* syntax_node, ScopedStatements* scope, bool is_statement = false) {
 	switch (syntax_node->kind) {
 		case SyntaxNodeKind::BinaryMathOperation: {
 			auto binary_math_operation = (SyntaxNodeBinaryMathOperation*)syntax_node;
-			if (!(linearize_syntax_node(linearizer, binary_math_operation->operands[0], containing_function)
-				  && linearize_syntax_node(linearizer, binary_math_operation->operands[1], containing_function))) {
+			if (!(linearize_syntax_node(linearizer, binary_math_operation->operands[0], scope)
+				  && linearize_syntax_node(linearizer, binary_math_operation->operands[1], scope))) {
 				return false;
 			}
 			
-			push_syntax_node(binary_math_operation, containing_function);
+			push_syntax_node(binary_math_operation, scope);
 		} break;
 		
 		case SyntaxNodeKind::Assignment: {
 			auto assignment = (SyntaxNodeAssignment*)syntax_node;
-			if (!(linearize_syntax_node(linearizer, assignment->destination_expression, containing_function)
-				  && linearize_syntax_node(linearizer, assignment->source_expression, containing_function))) {
+			if (!(linearize_syntax_node(linearizer, assignment->destination_expression, scope)
+				  && linearize_syntax_node(linearizer, assignment->source_expression, scope))) {
 				return false;
 			}
 			
-			push_syntax_node(assignment, containing_function);
+			push_syntax_node(assignment, scope);
 		} break;
 		
 		case SyntaxNodeKind::Return: {
 			auto return_node = (SyntaxNodeReturn*)syntax_node;
-			if (!linearize_syntax_node(linearizer, return_node->return_expression, containing_function)) {
+			if (!linearize_syntax_node(linearizer, return_node->return_expression, scope)) {
 				return false;
 			}
 			
-			push_syntax_node(return_node, containing_function);
+			push_syntax_node(return_node, scope);
 		} break;
 		
 		case SyntaxNodeKind::Declaration: {
 			auto declaration = (SyntaxNodeDeclaration*)syntax_node;
 			auto identifier = declaration->identifier->identifier;
 			
-			fox_for (value_index, containing_function->declarations.length) {
-				auto value = containing_function->declarations[value_index];
+			fox_for (value_index, scope->declarations.length) {
+				auto value = scope->declarations[value_index];
 				if (value->identifier == identifier) {
 					String error_message;
 					zero(&error_message);
@@ -1515,20 +1572,20 @@ internal bool linearize_syntax_node(LinearizerContext* linearizer, SyntaxNode* s
 			auto new_value = allocate<Value>(&heap_stack);
 			new_value->identifier = identifier;
 			create_linearized_type(linearizer, declaration->type_node, &new_value->type);
-			push(&containing_function->declarations, new_value, &heap_stack);
+			push(&scope->declarations, new_value, &heap_stack);
 			declaration->result = new_value;
 			
-			push_syntax_node(declaration, containing_function);
+			push_syntax_node(declaration, scope);
 		} break;
 		
 		case SyntaxNodeKind::ArrayAccess: {
 			auto array_access = (SyntaxNodeArrayAccess*)syntax_node;
-			if (!(linearize_syntax_node(linearizer, array_access->array_expression, containing_function)
-				  && linearize_syntax_node(linearizer, array_access->index_expression, containing_function))) {
+			if (!(linearize_syntax_node(linearizer, array_access->array_expression, scope)
+				  && linearize_syntax_node(linearizer, array_access->index_expression, scope))) {
 				return false;
 			}
 			
-			push_syntax_node(array_access, containing_function);
+			push_syntax_node(array_access, scope);
 		} break;
 		
 		case SyntaxNodeKind::Identifier:
@@ -1538,7 +1595,7 @@ internal bool linearize_syntax_node(LinearizerContext* linearizer, SyntaxNode* s
 				print_statement_does_nothing_warning(syntax_node);
 			}
 			
-			push_syntax_node(syntax_node, containing_function);
+			push_syntax_node(syntax_node, scope);
 		} break;
 		
 		case SyntaxNodeKind::Function: {
@@ -1546,6 +1603,17 @@ internal bool linearize_syntax_node(LinearizerContext* linearizer, SyntaxNode* s
 			if (!linearize_function(linearizer, function_node)) {
 				return false;
 			}
+		} break;
+		
+		case SyntaxNodeKind::IfElse: {
+			auto if_else = (SyntaxNodeIfElse*)syntax_node;
+			if (!linearize_syntax_node(linearizer, if_else->condition_expression, scope)
+				&& linearize_scoped_statements(linearizer, &if_else->if_body, scope)
+				&& linearize_scoped_statements(linearizer, &if_else->else_body, scope)) {
+				return false;
+			}
+			
+			push_syntax_node(syntax_node, scope);
 		} break;
 		
 		case SyntaxNodeKind::AtomicType:
@@ -1557,18 +1625,59 @@ internal bool linearize_syntax_node(LinearizerContext* linearizer, SyntaxNode* s
 	return true;
 }
 
-internal void push_syntax_node(SyntaxNode* syntax_node, SyntaxNodeFunction* containing_function) {
-	push(&containing_function->linear_syntax_nodes, syntax_node, &heap_stack);
+internal bool linearize_scoped_statements(LinearizerContext* linearizer, ScopedStatements* scoped_statements, ScopedStatements* outer_scope) {
+	scoped_statements->outer_scope = outer_scope;
+	scoped_statements->containing_function = outer_scope->containing_function;
+	
+	fox_for (statement_index, scoped_statements->statements.length) {
+		if (!linearize_syntax_node(linearizer, scoped_statements->statements[statement_index], scoped_statements, true)) {
+			return false;
+		}
+	}
+	
+	return true;
 }
 
-internal void print_statement_does_nothing_warning(SyntaxNode* statement) {
-	auto restore_point = create_restore_point(&heap_stack);
-	String error_message;
-	zero(&error_message);
-	write(&error_message, *statement->site, &heap_stack);
-	write(&error_message, "Warning: statement does nothing.\n", &heap_stack);
-	print(error_message);
-	restore(&heap_stack, restore_point);
+internal bool linearize_function(LinearizerContext* linearizer, SyntaxNodeFunction* function) {
+	push(&linearizer->functions, function, &heap_stack);
+	
+	function->body.containing_function = function;
+	
+	fox_for (argument_index, function->arguments.length) {
+		auto argument = &function->arguments[argument_index];
+		auto argument_value = allocate<Value>(&heap_stack);
+		argument_value->identifier = argument->identifier;
+		create_linearized_type(linearizer, argument->type_node, &argument_value->type);
+		argument_value->declaration_site = argument->site;
+		argument_value->is_argument = true;
+		argument->value = argument_value;
+		push(&function->body.declarations, argument_value, &heap_stack);
+	}
+	
+	function->return_types = allocate_array<Type*>(function->return_type_nodes, &heap_stack);
+	fox_for (return_type_index, function->return_types.length) {
+		create_linearized_type(linearizer, function->return_type_nodes[return_type_index], &function->return_types[return_type_index]);
+	}
+	
+	fox_for (statement_index, function->body.statements.length) {
+		if (!linearize_syntax_node(linearizer, function->body.statements[statement_index], &function->body, true)) {
+			return false;
+		}
+	}
+	
+	return true;
+}
+
+internal bool linearize(LinearizerContext* linearizer, Array<SyntaxNode*> statements) {
+	fox_for (statement_index, statements.length) {
+		auto statement = (SyntaxNodeFunction*)statements[statement_index];
+		fox_assert(statement->kind == SyntaxNodeKind::Function);
+		if (!linearize_function(linearizer, statement)) {
+			return false;
+		}
+	}
+	
+	return true;
 }
 
 template<typename AllocatorType>
@@ -1576,13 +1685,15 @@ internal void write(String* buffer, LinearizerContext* linearizer, AllocatorType
 	fox_for (function_index, linearizer->functions.length) {
 		auto function = linearizer->functions[function_index];
 		write_function_opening(buffer, function, allocator);
-		write(buffer, function->linear_syntax_nodes, 1, allocator);
+		write(buffer, function->body.syntax_nodes, 1, allocator);
 		write(buffer, "}\n\n", allocator);
 	}
 }
 
 //---Validater
-internal bool validate_syntax_node_semantics(SyntaxNode* syntax_node, SyntaxNodeFunction* containing_function) {
+internal bool validate_scoped_statements_semantics(ScopedStatements* scoped_statements);
+
+internal bool validate_syntax_node_semantics(SyntaxNode* syntax_node, ScopedStatements* scope) {
 	switch (syntax_node->kind) {
 		case SyntaxNodeKind::BinaryMathOperation: {
 			auto binary_math_operation = (SyntaxNodeBinaryMathOperation*)syntax_node;
@@ -1645,6 +1756,7 @@ internal bool validate_syntax_node_semantics(SyntaxNode* syntax_node, SyntaxNode
 		
 		case SyntaxNodeKind::Return: {
 			auto return_node = (SyntaxNodeReturn*)syntax_node;
+			auto containing_function = scope->containing_function;
 			fox_assert(containing_function->return_types.length == 1); //@bug support multiple returns
 			if (*return_node->return_expression->result->type != *containing_function->return_types[0]) {
 				String error_message;
@@ -1658,27 +1770,28 @@ internal bool validate_syntax_node_semantics(SyntaxNode* syntax_node, SyntaxNode
 		
 		case SyntaxNodeKind::Identifier: {
 			auto identifier = ((SyntaxNodeIdentifier*)syntax_node)->identifier;
-			Value* identified_value = nullptr;
-			fox_for (declaration_index, containing_function->declarations.length) {
-				auto declaration = containing_function->declarations[declaration_index];
-				if (declaration->identifier == identifier) {
-					identified_value = declaration;
-					break;
+			
+			ScopedStatements* current_scope = scope;
+			while (current_scope) {
+				fox_for (declaration_index, current_scope->declarations.length) {
+					auto declaration = current_scope->declarations[declaration_index];
+					if (declaration->identifier == identifier) {
+						syntax_node->result = declaration;
+						return true;
+					}
 				}
+				
+				current_scope = current_scope->outer_scope;
 			}
 			
-			if (!identified_value) {
-				String error_message;
-				zero(&error_message);
-				write(&error_message, *syntax_node->site, &heap_stack);
-				write(&error_message, "Semantic error: undeclared identifier ", &heap_stack);
-				write(&error_message, identifier, &heap_stack);
-				write(&error_message, "\n", &heap_stack);
-				print(error_message);
-				return false;
-			}
-			
-			syntax_node->result = identified_value;
+			String error_message;
+			zero(&error_message);
+			write(&error_message, *syntax_node->site, &heap_stack);
+			write(&error_message, "Semantic error: undeclared identifier ", &heap_stack);
+			write(&error_message, identifier, &heap_stack);
+			write(&error_message, "\n", &heap_stack);
+			print(error_message);
+			return false;
 		} break;
 		
 		case SyntaxNodeKind::Declaration: {
@@ -1748,6 +1861,22 @@ internal bool validate_syntax_node_semantics(SyntaxNode* syntax_node, SyntaxNode
 			string_node->result = string_value;
 		} break;
 		
+		case SyntaxNodeKind::IfElse: {
+			auto if_else = (SyntaxNodeIfElse*)syntax_node;
+			auto condition_expression = if_else->condition_expression;
+			auto condition_type = condition_expression->result->type;
+			if (condition_type->kind != TypeKind::Atomic) {
+				String error_message;
+				zero(&error_message);
+				write(&error_message, *condition_expression->site, &heap_stack);
+				write(&error_message, "Type error: expected integer type in if condition.\n", &heap_stack);
+				print(error_message);
+				return false;
+			}
+			
+			return validate_scoped_statements_semantics(&if_else->if_body) && validate_scoped_statements_semantics(&if_else->else_body);
+		} break;
+		
 		case SyntaxNodeKind::Function:
 		case SyntaxNodeKind::AtomicType:
 		case SyntaxNodeKind::FixedLengthArrayType:
@@ -1759,13 +1888,23 @@ internal bool validate_syntax_node_semantics(SyntaxNode* syntax_node, SyntaxNode
 	return true;
 }
 
-internal bool validate_function_semantics(SyntaxNodeFunction* function) {
-	fox_for (syntax_node_index, function->linear_syntax_nodes.length) {
-		if (!validate_syntax_node_semantics(function->linear_syntax_nodes[syntax_node_index], function)) {
+internal bool validate_scoped_statements_semantics(ScopedStatements* scoped_statements) {
+	fox_for (syntax_node_index, scoped_statements->syntax_nodes.length) {
+		if (!validate_syntax_node_semantics(scoped_statements->syntax_nodes[syntax_node_index], scoped_statements)) {
 			return false;
 		}
 	}
 	
+	return true;
+}
+
+internal bool validate_function_semantics(SyntaxNodeFunction* function) {
+	if (!validate_scoped_statements_semantics(&function->body)) {
+		return false;
+	}
+	
+	//@todo rewrite this control flow code to operate on an actual control flow graph
+#if 0
 	//Check for unreachable code
 	auto return_found = false;
 	SyntaxNode* maybe_return_statement = nullptr;
@@ -1792,6 +1931,7 @@ internal bool validate_function_semantics(SyntaxNodeFunction* function) {
 		print(error_message);
 		return false;
 	}
+#endif
 	
 	return true;
 }
@@ -1839,6 +1979,7 @@ internal bool validate_semantics(LinearizerContext* linearizer) {
 	return true;
 }
 
+#if 0
 //---C backend
 internal void compile_intermediate_constant_name_c(String* c_code, u32 intermediate_id) {
 	fox_assert(intermediate_id);
@@ -2105,6 +2246,7 @@ internal String compile_c(LinearizerContext* linearizer) {
 	
 	return c_code;
 }
+#endif
 
 //---Interpreter
 internal void interpret(String file_string, ConstString file_path) {
@@ -2154,7 +2296,7 @@ internal void interpret(String file_string, ConstString file_path) {
 #endif
 		
 		if (validate_semantics(&linearizer)) {
-			auto c_code = compile_c(&linearizer);
+			//auto c_code = compile_c(&linearizer);
 #if enable_c_backend_print
 			String c_code_console_output;
 			zero(&c_code_console_output);
