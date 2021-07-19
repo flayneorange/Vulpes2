@@ -958,6 +958,24 @@ internal void write(String* buffer, SyntaxNode* syntax_node, fuint indent, Alloc
 			write(buffer, "}", allocator);
 		} break;
 		
+		case SyntaxNodeKind::IfElse: {
+			auto if_else = (SyntaxNodeIfElse*)syntax_node;
+			write(buffer, "if ", allocator);
+			write(buffer, if_else->condition_expression, indent, allocator);
+			write(buffer, " {\n", allocator);
+			write(buffer, if_else->if_body.statements, indent + 1, allocator);
+			write_indent(buffer, indent, allocator);
+			write(buffer, "}", allocator);
+			if (if_else->else_body.statements) {
+				write(buffer, " else {\n", allocator);
+				write(buffer, if_else->else_body.statements, indent + 1, allocator);
+				write_indent(buffer, indent, allocator);
+				write(buffer, "}\n", allocator);
+			} else {
+				write(buffer, "\n", allocator);
+			}
+		} break;
+		
 		case SyntaxNodeKind::IntegerLiteral: {
 			auto integer = (SyntaxNodeIntegerLiteral*)syntax_node;
 			write_uint(buffer, integer->integer, allocator);
@@ -1654,24 +1672,32 @@ internal bool linearize_scoped_statements(LinearizerContext* linearizer, ScopedS
 	ControlFlowNode* current_control_flow_node = nullptr;
 	Array<SyntaxNode*>* dependency_order_syntax_nodes = nullptr;
 	
+	auto terminate_control_flow_node = [&]() {
+		push(control_flow_nodes_output, current_control_flow_node, &heap_stack);
+		current_control_flow_node = nullptr;
+		dependency_order_syntax_nodes = nullptr;
+	};
+	
 	fox_for (statement_index, scoped_statements->statements.length) {
 		auto statement = scoped_statements->statements[statement_index];
 		
 		switch (statement->kind) {
 			case SyntaxNodeKind::IfElse: {
 				if (current_control_flow_node) {
-					push(control_flow_nodes_output, current_control_flow_node, &heap_stack);
-					current_control_flow_node = nullptr;
+					terminate_control_flow_node();
 				}
 				
 				auto if_else_control_flow = create_control_flow_node(IfElse);
 				auto if_else_syntax_node = (SyntaxNodeIfElse*)statement;
+				if_else_control_flow->syntax_node = if_else_syntax_node;
 				
 				if (!(linearize_syntax_node(linearizer, if_else_syntax_node->condition_expression, scoped_statements, &if_else_control_flow->condition_syntax_nodes)
 					  && linearize_inner_scoped_statements(linearizer, &if_else_syntax_node->if_body, scoped_statements, &if_else_control_flow->if_control_flow_nodes)
 					  && linearize_inner_scoped_statements(linearizer, &if_else_syntax_node->else_body, scoped_statements, &if_else_control_flow->else_control_flow_nodes))) {
 					return false;
 				}
+				
+				push(control_flow_nodes_output, if_else_control_flow, &heap_stack);
 			} break;
 			
 			case SyntaxNodeKind::Return: {
@@ -1688,10 +1714,8 @@ internal bool linearize_scoped_statements(LinearizerContext* linearizer, ScopedS
 				
 				push(dependency_order_syntax_nodes, return_node, &heap_stack);
 				
-				//terminate this node
 				current_control_flow_node->definitely_returns = true;
-				push(control_flow_nodes_output, current_control_flow_node, &heap_stack);
-				current_control_flow_node = nullptr;
+				terminate_control_flow_node();
 			} break;
 			
 			default: {
@@ -1881,7 +1905,11 @@ internal bool validate_syntax_node_semantics(SyntaxNode* syntax_node, ScopedStat
 				String error_message;
 				zero(&error_message);
 				write(&error_message, *return_node->return_expression->site, &heap_stack);
-				write(&error_message, "Syntax Error: expected integer in return statement.\n", &heap_stack);
+				write(&error_message, "Type error: expected return expression to be type ", &heap_stack);
+				write(&error_message, containing_function->return_types[0], &heap_stack);
+				write(&error_message, " but got ", &heap_stack);
+				write(&error_message, return_node->return_expression->result->type, &heap_stack);
+				write(&error_message, "\n", &heap_stack);
 				print(error_message);
 				return false;
 			}
@@ -2007,6 +2035,13 @@ internal bool validate_control_flow_nodes(Array<ControlFlowNode*> control_flow_n
 			
 			case ControlFlowNodeKind::IfElse: {
 				auto if_else_control_flow_node = (ControlFlowNodeIfElse*)control_flow_node;
+				
+				//Validate the condition syntax nodes
+				fox_for (syntax_node_index, if_else_control_flow_node->condition_syntax_nodes.length) {
+					if (!validate_syntax_node_semantics(if_else_control_flow_node->condition_syntax_nodes[syntax_node_index], scope)) {
+						return false;
+					}
+				}
 				
 				//Validate the node itself
 				auto if_else_syntax_node = if_else_control_flow_node->syntax_node;

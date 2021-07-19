@@ -9,5 +9,9 @@ function main(): u8 {
 	return sum*/
 
 	test_fixed_length_array: [5]u8 = 'hello'
-	return test_fixed_length_array[0] + test_fixed_length_array[1]
+	sum: u8 = test_fixed_length_array[0] + test_fixed_length_array[1]
+	if sum {
+		return sum
+    }
+    return test_fixed_length_array[0]
 }
